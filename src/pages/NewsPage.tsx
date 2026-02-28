@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { NewAppLayout } from '@/components/layout/NewAppLayout';
+import { title } from 'process';
 
 const newsItems = [
   {
@@ -13,6 +14,12 @@ const newsItems = [
     title: 'Official Launch of the App',
     emoji: '🚀',
     body: 'We are excited to announce the official launch of our app! Thank you to everyone who has supported us during the beta phase. We have many new features and improvements planned, so stay tuned for more updates.'
+  },
+  {
+    date: 'February 28, 2026',
+    title: 'Purchase Credits with USDT',
+    emoji: '💵',
+    body: 'We now support purchasing credits with USDT! You can now buy credits directly using USDT on our store page.'
   },
   {
     date: 'February 20, 2026',
