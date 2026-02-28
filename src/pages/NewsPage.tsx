@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion';
 import { NewAppLayout } from '@/components/layout/NewAppLayout';
-import { title } from 'process';
 
 const newsItems = [
   {
@@ -56,21 +55,21 @@ const newsItems = [
 export default function NewsPage() {
   return (
     <NewAppLayout>
-      <div className="relative max-w-4xl mx-auto px-6 py-12">
+      <div className="relative max-w-5xl mx-auto px-4 sm:px-6 py-12">
 
-        {/* Background Primary Glow */}
+        {/* Background Glow */}
         <div className="absolute inset-0 -z-10 bg-gradient-to-b from-primary/20 via-transparent to-primary/10 blur-3xl" />
 
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          className="mb-16 text-center"
+          className="mb-12 md:mb-16 text-center"
         >
-          <h1 className="text-5xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent p-1">
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent p-1">
             Updates
           </h1>
-          <p className="mt-4 text-muted-foreground text-lg">
+          <p className="mt-4 text-muted-foreground text-base sm:text-lg">
             What’s new and what’s coming next.
           </p>
         </motion.div>
@@ -78,10 +77,19 @@ export default function NewsPage() {
         {/* Timeline */}
         <div className="relative">
 
-          {/* Vertical Spine */}
-          <div className="absolute left-1/2 top-0 bottom-0 w-[3px] -translate-x-1/2 bg-gradient-to-b from-primary via-primary/70 to-primary rounded-full opacity-40" />
+          {/* Spine */}
+          <div className="
+            absolute 
+            left-4 md:left-1/2 
+            top-0 bottom-0 
+            w-[3px] 
+            md:-translate-x-1/2 
+            bg-gradient-to-b from-primary via-primary/70 to-primary 
+            rounded-full 
+            opacity-40
+          " />
 
-          <div className="space-y-24">
+          <div className="space-y-14 md:space-y-24">
             {newsItems.map((item, idx) => {
               const isLeft = idx % 2 === 0;
 
@@ -90,15 +98,37 @@ export default function NewsPage() {
                   key={idx}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: idx * 0.1 }}
-                  className={`relative flex ${isLeft ? 'justify-start' : 'justify-end'}`}
+                  transition={{ delay: idx * 0.08 }}
+                  className={`
+                    relative flex 
+                    justify-start 
+                    md:${isLeft ? 'justify-start' : 'justify-end'}
+                  `}
                 >
 
-                  {/* Timeline Dot */}
-                  <div className="absolute left-1/2 -translate-x-1/2 top-6 w-5 h-5 bg-primary rounded-full shadow-[0_0_25px_hsl(var(--primary)/0.6)] z-10" />
+                  {/* Dot */}
+                  <div className="
+                    absolute 
+                    left-4 md:left-1/2 
+                    top-6 
+                    w-4 h-4 md:w-5 md:h-5 
+                    md:-translate-x-1/2 
+                    bg-primary 
+                    rounded-full 
+                    shadow-[0_0_25px_hsl(var(--primary)/0.6)] 
+                    z-10
+                  " />
 
                   {/* Content */}
-                  <div className={`w-[45%] ${isLeft ? 'pr-8 text-right' : 'pl-8 text-left'}`}>
+                  <div className={`
+                    w-full md:w-[45%] 
+                    pl-12 md:pl-0
+                    ${isLeft 
+                      ? 'md:pr-8 md:text-right' 
+                      : 'md:pl-8 md:text-left'
+                    }
+                    text-left
+                  `}>
 
                     {/* Date */}
                     <div className="inline-block mb-4 px-4 py-1 text-xs font-semibold rounded-full bg-primary/15 text-primary">
@@ -106,22 +136,25 @@ export default function NewsPage() {
                     </div>
 
                     {/* Title */}
-                    <h2 className={`text-2xl font-semibold flex items-center gap-3 ${isLeft ? 'justify-end' : 'justify-start'} text-primary`}>
-                      {isLeft ? (
-                        <>
-                          <span>{item.title}</span>
-                          <span className="text-3xl">{item.emoji}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span className="text-3xl">{item.emoji}</span>
-                          <span>{item.title}</span>
-                        </>
-                      )}
+                    <h2 className={`
+                      text-lg sm:text-xl md:text-2xl 
+                      font-semibold 
+                      flex items-center gap-3 
+                      ${isLeft 
+                        ? 'md:justify-end' 
+                        : 'md:justify-start'
+                      }
+                      justify-start
+                      text-primary
+                    `}>
+                      <span className="text-2xl md:text-3xl">
+                        {item.emoji}
+                      </span>
+                      <span>{item.title}</span>
                     </h2>
 
                     {/* Body */}
-                    <p className="mt-4 text-muted-foreground leading-relaxed">
+                    <p className="mt-4 text-muted-foreground leading-relaxed text-sm sm:text-base">
                       {item.body}
                     </p>
 
