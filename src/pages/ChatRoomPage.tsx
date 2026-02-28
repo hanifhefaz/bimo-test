@@ -1055,7 +1055,7 @@ export default function ChatRoomPage() {
               moderators={room?.moderators || []}
             />
 
-            {(room.ownerId === userProfile.uid || room.moderators?.includes(userProfile.uid)) && (
+            {(room.ownerId === userProfile.uid || room.moderators?.includes(userProfile.uid) || userProfile.isAdmin || userProfile.isChatAdmin) && (
               <RoomSettings room={room!} onUpdate={loadRoom} />
             )}
 

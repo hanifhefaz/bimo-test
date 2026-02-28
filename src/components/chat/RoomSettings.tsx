@@ -34,12 +34,13 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
   const isOwner = userProfile?.uid === room.ownerId;
   const isMod = room.moderators?.includes(userProfile?.uid || '');
   const isGlobalAdmin = !!userProfile?.isAdmin;
+  const isChatAdmin = !!userProfile?.isChatAdmin;
   // Detect system rooms - rooms with ownerId 'system' or without an owner
   const isSystemRoom = room.ownerId === 'system' || !room.ownerId;
-  // Global admins can manage ALL rooms (including system rooms), owners and mods can manage their rooms
-  const canEdit = isOwner || isMod || isGlobalAdmin;
+  // Global admins or chat‑admins can edit any room; owners and mods can edit their own
+  const canEdit = isOwner || isMod || isGlobalAdmin || isChatAdmin;
   // Only owners (or admins for system rooms) can manage moderators
-  const canManageModerators = isOwner || (isGlobalAdmin && isSystemRoom);
+  const canManageModerators = isOwner || (isGlobalAdmin && isSystemRoom) || (isChatAdmin && isSystemRoom);
 
   if (!canEdit) return null;
 
