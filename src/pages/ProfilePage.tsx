@@ -37,7 +37,13 @@ import PetAnimation from '@/components/PetAnimation';
 import { Badge } from '@/components/ui/badge';
 import { STORE_ITEMS, transferCredits, getTransactionHistory, Transaction, getXpProgress } from '@/lib/firebaseOperations';
 import { getBadgeForLevel, getNextBadge, getLevelsUntilNextBadge } from '@/lib/badges';
-import { AVATAR_ITEMS } from '@/lib/avatarItems';
+import {
+  AVATAR_ITEMS,
+  computeFrameCss,
+  needsSvgBorder,
+  makeBorderPoints,
+  BorderStyle
+} from '@/lib/avatarItems';
 import { CustomAvatar } from '@/components/CustomAvatar';
 import { formatShortNumber, formatWithCommas } from '@/lib/utils';
 import { getCountryByCode } from '@/lib/countries';
@@ -51,18 +57,8 @@ export default function ProfilePage() {
   const navigate = useNavigate();
   const PAGE_SIZE = 20;
 
-  // helper to match CustomAvatar zigzag points; small copy so previews look the same
-  const makeZigzagPoints = (segments = 32, outer = 48, inner = 42) => {
-    const pts: string[] = [];
-    for (let i = 0; i < segments; i++) {
-      const angle = (Math.PI * 2 * i) / segments;
-      const r = i % 2 === 0 ? outer : inner;
-      const x = 50 + r * Math.cos(angle);
-      const y = 50 + r * Math.sin(angle);
-      pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
-    }
-    return pts.join(' ');
-  };
+  // border SVG points are generated via the shared helper; zigzag/spiked/ornate
+  // shapes all come from `makeBorderPoints`.
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [visibleCount, setVisibleCount] = useState<number>(PAGE_SIZE);
   const [loadingTransactions, setLoadingTransactions] = useState(false);
@@ -213,7 +209,7 @@ export default function ProfilePage() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.4 }}
-                className="relative rounded-2xl border border-border/50 bg-background/70 backdrop-blur-xl shadow-lg overflow-hidden"
+                className="relative rounded-2xl border border-border/50 bg-background/70 backdrop-blur-xl"
                 >
                 {/* Subtle Gradient Edge */}
                 <div className="absolute inset-0 bg-gradient-to-r from-primary/10 via-transparent to-accent/10 pointer-events-none" />
@@ -225,16 +221,15 @@ export default function ProfilePage() {
                     <div className="flex flex-col items-center md:items-start shrink-0">
                         <motion.div
                         whileHover={{ scale: 1.04 }}
-                        transition={{ type: "spring", stiffness: 260 }}
                         className="relative"
                         >
-                        <div className="p-1 rounded-full bg-gradient-to-tr from-primary to-accent">
+                        <div className="p-1">
                             <CustomAvatar
                             avatar={userProfile.avatar}
                             imageUrl={userProfile.profileImageUrl}
                             avatarItems={userProfile.avatarItems}
                             size="xl"
-                            className="w-28 h-28 border-4 border-background"
+                            className="w-28 h-28"
                             />
                         </div>
 
@@ -681,22 +676,22 @@ export default function ProfilePage() {
                           equipped === item.id
                             ? 'border-primary bg-primary/20'
                             : 'border-white/10 bg-secondary/50 hover:border-primary/50'
-                        }`}
+                        } ${item.type === 'frame' ? computeFrameCss(item, 2).className || '' : ''}`}
                         style={
                           item.type === 'background'
                             ? { background: item.cssValue }
-                            : item.type === 'frame' && item.borderStyle !== 'zigzag'
-                            ? { border: `2px solid ${item.cssValue || 'transparent'}` }
+                            : item.type === 'frame'
+                            ? computeFrameCss(item, 2).style
                             : undefined
                         }
                       >
-                        {item.type === 'frame' && item.borderStyle === 'zigzag' && item.cssValue && (
+                        {item.type === 'frame' && needsSvgBorder(item.borderStyle) && item.cssValue && (
                           <svg
                             className="absolute inset-0 w-full h-full pointer-events-none"
                             viewBox="0 0 100 100"
                           >
                             <polygon
-                              points={makeZigzagPoints()}
+                              points={makeBorderPoints(item.borderStyle)}
                               fill="none"
                               stroke={item.cssValue}
                               strokeWidth="2"

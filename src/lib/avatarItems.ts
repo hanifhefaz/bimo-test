@@ -1,3 +1,5 @@
+import type { CSSProperties } from 'react';
+
 // Avatar customization items for the store
 export interface AvatarItem {
   id: string;
@@ -7,13 +9,21 @@ export interface AvatarItem {
   price: number;
   cssValue?: string;
   /**
-   * how the frame border should be rendered; "solid" (default) or
-   * "zigzag" for a jagged outline.  Only respected when `type === 'frame'`.
+   * how the frame border should be rendered
    */
-  borderStyle?: 'solid' | 'zigzag';
+  borderStyle?: 
+    | 'solid' 
+    | 'zigzag' 
+    | 'dashed' 
+    | 'dotted' 
+    | 'double' 
+    | 'glow' 
+    | 'neon-pulse' 
+    | 'gradient-ring' 
+    | 'spiked' 
+    | 'ornate';
   description: string;
 }
-
 export const AVATAR_ITEMS: AvatarItem[] = [
   // Backgrounds
 // Backgrounds
@@ -121,12 +131,6 @@ export const AVATAR_ITEMS: AvatarItem[] = [
 // Frames (decorate the avatar with a circular border)
 { id: 'frame_bronze', name: 'Bronze Frame', type: 'frame', emoji: '🥉', price: 0.12, cssValue: '#cd7f32', description: 'Classic bronze border' },
 
-{ id: 'frame_platinum', name: 'Platinum Frame', type: 'frame', emoji: '💎', price: 0.30, cssValue: '#e5e4e2', description: 'Premium platinum border' },
-
-{ id: 'frame_diamond', name: 'Diamond Frame', type: 'frame', emoji: '🔷', price: 0.50, cssValue: 'linear-gradient(45deg,#b9f2ff,#e0ffff)', description: 'Sparkling diamond border' },
-
-{ id: 'frame_rainbow', name: 'Rainbow Frame', type: 'frame', emoji: '🌈', price: 0.25, cssValue: 'linear-gradient(90deg, red, orange, yellow, green, blue, indigo, violet)', description: 'Colorful rainbow border' },
-
 { id: 'frame_neon_pink', name: 'Neon Pink Frame', type: 'frame', emoji: '💖', price: 0.22, cssValue: '#ff1493', description: 'Bright neon pink glow border' },
 
 { id: 'frame_neon_blue', name: 'Neon Blue Frame', type: 'frame', emoji: '🔵', price: 0.22, cssValue: '#00f0ff', description: 'Electric blue neon border' },
@@ -139,18 +143,94 @@ export const AVATAR_ITEMS: AvatarItem[] = [
 
 { id: 'frame_obsidian', name: 'Obsidian Frame', type: 'frame', emoji: '🖤', price: 0.18, cssValue: '#0b0b0b', description: 'Dark obsidian border' },
 
-{ id: 'frame_fire', name: 'Fire Frame', type: 'frame', emoji: '🔥', price: 0.35, cssValue: 'linear-gradient(45deg,#ff4500,#ffae00)', description: 'Fiery animated-style border' },
-
-{ id: 'frame_ice', name: 'Ice Frame', type: 'frame', emoji: '❄️', price: 0.24, cssValue: 'linear-gradient(45deg,#aeefff,#e0ffff)', description: 'Cool icy blue border' },
-
-{ id: 'frame_galaxy', name: 'Galaxy Frame', type: 'frame', emoji: '🌌', price: 0.40, cssValue: 'linear-gradient(45deg,#2b1055,#7597de)', description: 'Cosmic galaxy border' },
-
 { id: 'frame_royal_purple', name: 'Royal Purple Frame', type: 'frame', emoji: '👑', price: 0.26, cssValue: '#6a0dad', description: 'Regal purple border' },
 
 { id: 'frame_minimal_white', name: 'Minimal White Frame', type: 'frame', emoji: '⚪', price: 0.08, cssValue: '#ffffff', description: 'Clean minimalist white border' },
 
   // example of a zigzag outline frame
-  { id: 'frame_zigzag', name: 'Zigzag Frame', type: 'frame', emoji: '🔷', price: 0.40, cssValue: '#00f', borderStyle: 'zigzag', description: 'Fun zigzag border' }
+{ id: 'frame_zigzag', name: 'Zigzag Frame', type: 'frame', emoji: '', price: 0.40, cssValue: '#00f', borderStyle: 'zigzag', description: 'Fun zigzag border' },
+  // Additional frames
+{
+  id: 'frame_dashed_lime',
+  name: 'Lime Dash',
+  type: 'frame',
+  emoji: '',
+  price: 0.18,
+  cssValue: '#84cc16',
+  borderStyle: 'dashed',
+  description: 'Energetic dashed lime frame'
+},
+{
+  id: 'frame_dotted_pink',
+  name: 'Pink Dots',
+  type: 'frame',
+  emoji: '',
+  price: 0.20,
+  cssValue: '#ec4899',
+  borderStyle: 'dotted',
+  description: 'Playful dotted pink ring'
+},
+{
+  id: 'frame_double_gold',
+  name: 'Golden Double',
+  type: 'frame',
+  emoji: '',
+  price: 0.45,
+  cssValue: '#facc15',
+  borderStyle: 'double',
+  description: 'Double-layered prestige frame'
+},
+{
+  id: 'frame_glow_cyan',
+  name: 'Cyan Glow',
+  type: 'frame',
+  emoji: '',
+  price: 0.50,
+  cssValue: '#06b6d4',
+  borderStyle: 'glow',
+  description: 'Soft glowing cyan aura'
+},
+{
+  id: 'frame_neon_red',
+  name: 'Neon Inferno',
+  type: 'frame',
+  emoji: '',
+  price: 0.65,
+  cssValue: '#ef4444',
+  borderStyle: 'neon-pulse',
+  description: 'Pulsing red neon border'
+},
+{
+  id: 'frame_spiked_crimson',
+  name: 'Crimson Spikes',
+  type: 'frame',
+  emoji: '',
+  price: 0.95,
+  cssValue: '#b91c1c',
+  borderStyle: 'spiked',
+  description: 'Aggressive spiked battle frame'
+},
+{
+  id: 'frame_spiked_crimson_2',
+  name: 'Crimson Spikes',
+  type: 'frame',
+  emoji: '',
+  price: 0.95,
+  cssValue: '#3910f0',
+  borderStyle: 'spiked',
+  description: 'Aggressive spiked battle frame'
+},
+{
+  id: 'frame_ornate_royal',
+  name: 'Royal Crest',
+  type: 'frame',
+  emoji: '',
+  price: 1.10,
+  cssValue: '#eab308',
+  borderStyle: 'ornate',
+  description: 'Elegant royal-style frame'
+},
+
 ];
 
 export function getAvatarItemsByType(type: AvatarItem['type']): AvatarItem[] {
@@ -162,3 +242,101 @@ export function getAvatarItemById(id: string): AvatarItem | undefined {
 }
 
 export const AVATAR_ITEM_TYPES: AvatarItem['type'][] = ['background', 'face', 'frame'];
+
+// expose the border style type so other parts of the app can reference it
+export type BorderStyle = AvatarItem['borderStyle'];
+
+/**
+ * CSS helper result for frame rendering.  `style` contains inline
+ * properties, `className` can be applied via `cn()`.
+ */
+export interface FrameCss {
+  style?: CSSProperties;
+  className?: string;
+}
+
+/**
+ * Determine whether a style is drawn with an SVG overlay instead of a
+ * normal border.  Currently zigzag, spiked and ornate use SVGs.
+ */
+export function needsSvgBorder(style?: BorderStyle): boolean {
+  return style === 'zigzag' || style === 'spiked' || style === 'ornate';
+}
+
+/**
+ * Returns a polygon point string suitable for an SVG border.  Different
+ * border styles produce different shapes; callers should only render an
+ * SVG when `needsSvgBorder` returns true.
+ */
+export function makeBorderPoints(style?: BorderStyle, segments = 32): string {
+  const pts: string[] = [];
+  for (let i = 0; i < segments; i++) {
+    const angle = (Math.PI * 2 * i) / segments;
+    let r: number;
+
+    if (style === 'spiked') {
+      // deeper inner radius creates long spikes
+      r = i % 2 === 0 ? 48 : 20;
+    } else if (style === 'zigzag') {
+      r = i % 2 === 0 ? 48 : 42;
+    } else if (style === 'ornate') {
+      // gentle wavy pattern using a sine wave; keep radii close
+      r = 46 + 2 * Math.sin(angle * 6);
+    } else {
+      // fallback circle
+      r = 48;
+    }
+
+    const x = 50 + r * Math.cos(angle);
+    const y = 50 + r * Math.sin(angle);
+    pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
+  }
+  return pts.join(' ');
+}
+
+/**
+ * Compute inline CSS (and occasionally helper class names) for a frame
+ * avatar item.  Handles every borderStyle value that a frame can have.
+ */
+export function computeFrameCss(
+  item: AvatarItem | undefined,
+  borderWidth = 4
+): FrameCss {
+  if (!item || item.type !== 'frame' || !item.cssValue) {
+    return {};
+  }
+
+  const css: CSSProperties = {};
+  let className = '';
+
+  switch (item.borderStyle) {
+    case 'dashed':
+    case 'dotted':
+    case 'double':
+    case 'solid':
+    case undefined:
+      css.border = `${borderWidth}px ${item.borderStyle || 'solid'} ${item.cssValue}`;
+      break;
+    case 'glow':
+      css.boxShadow = `0 0 ${borderWidth * 2}px ${item.cssValue}`;
+      break;
+    case 'neon-pulse':
+      css.boxShadow = `0 0 ${borderWidth * 2}px ${item.cssValue}`;
+      className = 'animate-pulse-glow';
+      break;
+    case 'gradient-ring':
+      css.border = `${borderWidth}px solid transparent`;
+      css.borderImage = `${item.cssValue} 1`;
+      break;
+    case 'zigzag':
+    case 'spiked':
+    case 'ornate':
+      // these styles are drawn with an SVG overlay; leave the normal
+      // border empty and let the consumer render the polygon
+      break;
+    default:
+      css.border = `${borderWidth}px solid ${item.cssValue}`;
+  }
+
+  return { style: css, className };
+}

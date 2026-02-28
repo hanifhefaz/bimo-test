@@ -1,5 +1,11 @@
 import { cn } from '@/lib/utils';
-import { getAvatarItemById } from '@/lib/avatarItems';
+import {
+  getAvatarItemById,
+  computeFrameCss,
+  needsSvgBorder,
+  makeBorderPoints,
+  BorderStyle
+} from '@/lib/avatarItems';
 
 interface AvatarItems {
   background?: string;
@@ -22,19 +28,9 @@ const sizeClasses = {
   xl: 'w-16 h-16 text-3xl'
 };
 
-// helper that generates a zigzag polygon around a 100x100 box
-function makeZigzagPoints(segments = 32, outer = 48, inner = 42) {
-  const pts: string[] = [];
-  for (let i = 0; i < segments; i++) {
-    const angle = (Math.PI * 2 * i) / segments;
-    const r = i % 2 === 0 ? outer : inner;
-    const x = 50 + r * Math.cos(angle);
-    const y = 50 + r * Math.sin(angle);
-    pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
-  }
-  return pts.join(' ');
-}
-
+// polygon points for zigzag/spiked/ornate borders are produced by the
+// shared `makeBorderPoints` helper in avatarItems.ts; the old local
+// zigzag helper has been removed.
 export function CustomAvatar({ avatar, imageUrl, avatarItems, size = 'md', className }: CustomAvatarProps) {
   // Resolve avatar item IDs to actual items when necessary
   const resolvedBg = avatarItems?.background ? getAvatarItemById(avatarItems.background) : undefined;
@@ -45,30 +41,26 @@ export function CustomAvatar({ avatar, imageUrl, avatarItems, size = 'md', class
   const bgContent = resolvedBg?.emoji ?? (avatarItems?.background && !resolvedBg ? avatarItems.background : undefined);
   const faceContent = resolvedFace?.emoji ?? (avatarItems?.face && !resolvedFace ? avatarItems.face : undefined);
 
-  // normal solid border style, used when we do not have a zigzag frame
-  const frameStyle =
-    resolvedFrame && resolvedFrame.borderStyle !== 'zigzag' && resolvedFrame.cssValue
-      ? { border: `4px solid ${resolvedFrame.cssValue}` }
-      : undefined;
+  // compute whatever CSS and helper classes are needed for the frame
+  const { style: frameStyle, className: frameClass } = computeFrameCss(resolvedFrame, 4);
   const frameContent = resolvedFrame?.emoji;
 
-  const isZigzag = resolvedFrame?.borderStyle === 'zigzag';
+  const isSvgBorder = needsSvgBorder(resolvedFrame?.borderStyle);
 
   return (
     // outer wrapper holds the optional frame border; ensure it's always a circle
     // so the border follows the rounded background and avatar inside.
     <div
-      className={cn('relative rounded-full overflow-hidden', sizeClasses[size], className)}
+      className={cn('relative rounded-full overflow-hidden', sizeClasses[size], className, frameClass)}
       style={frameStyle}
     >
-      {isZigzag && resolvedFrame?.cssValue && (
+      {isSvgBorder && resolvedFrame?.cssValue && (
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
           viewBox="0 0 100 100"
         >
           <polygon
-            points={makeZigzagPoints()}
-            fill="none"
+            points={makeBorderPoints(resolvedFrame?.borderStyle as BorderStyle)}
             stroke={resolvedFrame.cssValue}
             strokeWidth="4"
             strokeLinejoin="miter"

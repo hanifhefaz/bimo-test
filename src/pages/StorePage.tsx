@@ -5,7 +5,15 @@ import { StoreItemCard } from '@/components/cards/StoreItemCard';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { STORE_ITEMS, CREDIT_PACKS, XP_BOOSTS, EMOTICON_PACKS, purchaseItem, purchaseAvatarItem, purchaseXPBoost, purchaseCreditPack, sellPackToUser, purchaseEmoticonPack } from '@/lib/firebaseOperations';
-import { getAvatarItemsByType, AVATAR_ITEM_TYPES, AvatarItem } from '@/lib/avatarItems';
+import {
+  getAvatarItemsByType,
+  AVATAR_ITEM_TYPES,
+  AvatarItem,
+  computeFrameCss,
+  needsSvgBorder,
+  makeBorderPoints,
+  BorderStyle
+} from '@/lib/avatarItems';
 import { toast } from 'sonner';
 import { ShoppingBag, Heart, Gem, Store, Palette, Loader2, Coins, Zap, Smile, CheckCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -106,18 +114,8 @@ export default function StorePage() {
     }
   };
 
-// zigzag helper copied so the store card display matches the profile preview
-const makeZigzagPoints = (segments = 32, outer = 48, inner = 42) => {
-  const pts: string[] = [];
-  for (let i = 0; i < segments; i++) {
-    const angle = (Math.PI * 2 * i) / segments;
-    const r = i % 2 === 0 ? outer : inner;
-    const x = 50 + r * Math.cos(angle);
-    const y = 50 + r * Math.sin(angle);
-    pts.push(`${x.toFixed(2)},${y.toFixed(2)}`);
-  }
-  return pts.join(' ');
-};
+// we no longer need a custom zigzag helper – use `makeBorderPoints` from
+// the shared avatarItems utilities which covers zigzag, spiked and ornate.
 
 const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) => (
   <motion.div
@@ -137,6 +135,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
   >
     <div
       className={
+        // base layout classes + optional frame-specific helper class
         `
         w-full
         aspect-square
@@ -145,23 +144,24 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
         mb-2 sm:mb-3
         text-3xl sm:text-4xl md:text-5xl
         relative
+      ${item.type === 'frame' ? computeFrameCss(item, 2).className || '' : ''}
       `
       }
       style={
-        item.type === 'frame' && item.borderStyle !== 'zigzag'
-          ? { border: `2px solid ${item.cssValue || 'currentColor'}`, background: 'transparent' }
-          : item.type === 'background'
+        item.type === 'background'
           ? { background: item.cssValue || 'var(--secondary)' }
+          : item.type === 'frame'
+          ? computeFrameCss(item, 2).style
           : undefined
       }
     >
-      {item.type === 'frame' && item.borderStyle === 'zigzag' && item.cssValue && (
+      {item.type === 'frame' && needsSvgBorder(item.borderStyle) && item.cssValue && (
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
           viewBox="0 0 100 100"
         >
           <polygon
-            points={makeZigzagPoints()}
+            points={makeBorderPoints(item.borderStyle)}
             fill="none"
             stroke={item.cssValue}
             strokeWidth="2"

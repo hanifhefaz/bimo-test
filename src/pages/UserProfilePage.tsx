@@ -247,11 +247,6 @@ export default function UserProfilePage() {
           animate={{ opacity: 1, y: 0 }}
           className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-primary/20 via-accent/10 to-secondary/20 border border-white/10"
         >
-          {/* Background Pattern */}
-          <div className="absolute inset-0 opacity-5">
-            <div className="absolute top-0 right-0 w-64 h-64 bg-primary rounded-full blur-3xl" />
-            <div className="absolute bottom-0 left-0 w-48 h-48 bg-accent rounded-full blur-3xl" />
-          </div>
 
           <div className="relative p-6">
             {/* Avatar & Status Row */}
@@ -262,7 +257,7 @@ export default function UserProfilePage() {
                   imageUrl={profile.profileImageUrl}
                   avatarItems={profile.avatarItems}
                   size="xl"
-                  className="w-20 h-20 text-5xl ring-4 ring-white/20"
+                  className="w-20 h-20 text-5xl"
                 />
               </div>
 
