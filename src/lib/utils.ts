@@ -117,14 +117,14 @@ export function getUsernameColorClass(user?: {
   const mentorActive = !!user.isMentor && (!user.mentorExpiry || user.mentorExpiry > now);
 
   // Staff should always be shown in black and take precedence over other roles.
-  if (user.isStaff) return 'text-black';        // black for staff users
+  if (user.isStaff) return '#a3e635';        // black for staff users
   if (user.isAdmin) return 'text-destructive'; // red for admins
   // chat admins are beneath full admins but above everyone else; give them a yellow hue
   if (user.isChatAdmin) return 'text-yellow-500';
   if (mentorActive) return 'text-pink-500';     // pink for mentors (Elite pack)
   if (merchantActive) {
     // Pro pack = gold, Standard pack = purple
-    if (user.merchantLevel === 'pro') return 'text-gold';
+    if (user.merchantLevel === 'pro') return '#4ade80';
     return 'text-violet-500'; // Standard pack = purple
   }
   return 'text-sky-500';                        // blue for regular users

@@ -14,8 +14,8 @@ import Username from '@/components/Username';
 import { useNavigate } from 'react-router-dom';
 
 const categories = [
-  { id: 'admins', label: 'Admins' },
-  { id: 'chatAdmins', label: 'Chat Admins' },
+  { id: 'admins', label: 'System Admins' },
+  { id: 'chatAdmins', label: 'Global Admins' },
   { id: 'staff', label: 'Staff' },
   { id: 'merchants', label: 'Merchants' },
   { id: 'mentors', label: 'Mentors' },
@@ -139,7 +139,7 @@ export default function PeoplePage() {
         <div className="divide-y divide-border">
           {categories.map((cat) => (
             <div key={cat.id} className="py-4">
-              <h2 className="text-lg font-semibold">{cat.label}</h2>
+              <h2 className="text-lg font-semibold p-2">{cat.label}</h2>
               {cat.id === 'admins' && renderUserList(admins)}
               {cat.id === 'chatAdmins' && renderUserList(chatAdmins)}
               {cat.id === 'staff' && renderUserList(staff)}
