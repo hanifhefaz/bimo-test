@@ -15,7 +15,8 @@ import { formatWithCommas } from '@/lib/utils';
 import LogoImg from '@/assets/icon.png';
 // payment method images (add these files to your assets folder)
 import BinancePayImg from '@/assets/binance-pay.png';
-import BinanceUsdtImg from '@/assets/binance-usdt.png';
+import BinanceUsdtImg from '@/assets/binance-usdt.jpg';
+import UsdtLogo from '@/assets/usdt.png';
 
 export default function StorePage() {
   const { userProfile, refreshProfile } = useAuth();
@@ -501,7 +502,14 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     <h4 className="font-bold text-sm mb-1">{pack.name || pack.id}</h4>
                     <h4 className="font-bold text-lg text-sky-500">{formatWithCommas(pack.credits)}</h4>
                     <p className="text-xs text-muted-foreground mb-3">credits</p>
-                    <div className="text-lg font-semibold">${pack.price}</div>
+                    <div className="flex items-center justify-center gap-1 text-lg font-semibold">
+                      <img
+                        src={UsdtLogo}
+                        alt="USDT"
+                        className="h-4 w-4 object-contain"
+                      />
+                      <span>{pack.price}</span>
+                    </div>
 
                     {/* Special notes for automatic roles */}
                     {pack.id === 'pack_standard' && (
@@ -535,47 +543,93 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
               </div>
             </motion.div>
 
-            {/* new payment methods info */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.2 }}
-              className="mt-4 p-4 rounded-xl bg-secondary/10 border border-secondary/30"
+            <motion.section
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.4 }}
+              className="mt-6"
             >
-              <h4 className="font-semibold mb-2">💳 Payment Methods</h4>
-              <p className="text-sm text-muted-foreground">
-                You can purchase credit packs via Binance Pay using the Pay ID below
-                or by depositing USDT through one of the supported networks. Click the
-                images for more details.
-              </p>
-              <div className="flex flex-col sm:flex-row items-center gap-4 mt-2">
-                <a
-                  href="https://www.binance.com/en/pay"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <img
-                    src={BinancePayImg}
-                    alt="Binance Pay ID"
-                    className="h-16"
-                  />
-                </a>
-                <a
-                  href="https://www.binance.com/en/deposit-usdt"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <img
-                    src={BinanceUsdtImg}
-                    alt="USDT Deposit Networks"
-                    className="h-16"
-                  />
-                </a>
+              <div className="rounded-2xl border border-secondary/30 bg-secondary/10 p-6">
+
+                {/* Header */}
+                <div>
+                  <h3 className="text-lg sm:text-xl font-semibold flex items-center gap-2">
+                    💳 Payment Methods
+                  </h3>
+                  <p className="text-sm text-muted-foreground mt-1 max-w-xl">
+                    Purchase credit packs via Binance Pay or deposit USDT using supported networks.
+                  </p>
+                </div>
+
+                <div className="h-px bg-secondary/30 my-6" />
+
+                {/* Responsive Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+                  {/* Binance Pay */}
+                  <a
+                    href="https://www.binance.com/en/pay"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group rounded-xl border border-secondary/30 bg-background/40 hover:bg-background/60 transition-all duration-300 p-5 flex flex-col items-center text-center"
+                  >
+                    {/* Portrait Image Wrapper */}
+                    <div className="w-full max-w-[240px] sm:max-w-[280px] md:max-w-[220px] 
+                                    aspect-[9/16] 
+                                    rounded-xl overflow-hidden 
+                                    border border-secondary/20 
+                                    shadow-sm bg-black/5 
+                                    flex items-center justify-center">
+
+                      <img
+                        src={BinancePayImg}
+                        alt="Binance Pay ID"
+                        className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-105"
+                      />
+                    </div>
+
+                    <h4 className="mt-4 font-medium">Binance Pay</h4>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Use the provided Pay ID to complete your payment.
+                    </p>
+
+                  </a>
+
+                  {/* USDT Deposit */}
+                  <a
+                    href="https://www.binance.com/en/deposit-usdt"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group rounded-xl border border-secondary/30 bg-background/40 hover:bg-background/60 transition-all duration-300 p-5 flex flex-col items-center text-center"
+                  >
+                    <div className="w-full max-w-[240px] sm:max-w-[280px] md:max-w-[220px] 
+                                    aspect-[9/16] 
+                                    rounded-xl overflow-hidden 
+                                    border border-secondary/20 
+                                    shadow-sm bg-black/5 
+                                    flex items-center justify-center">
+
+                      <img
+                        src={BinanceUsdtImg}
+                        alt="USDT Deposit Networks"
+                        className="h-full w-full object-contain transition-transform duration-300 group-hover:scale-105"
+                      />
+                    </div>
+
+                    <h4 className="mt-4 font-medium">USDT Deposit</h4>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Deposit USDT via supported blockchain networks.
+                    </p>
+                  </a>
+
+                </div>
+
+                <p className="text-xs text-muted-foreground mt-6 text-center md:text-left">
+                  Use the Pay ID or deposit wallet details shown above when completing your transaction.
+                </p>
+
               </div>
-              <p className="text-xs text-muted-foreground mt-2">
-                Use the Pay ID or deposit details shown above when completing your payment.
-              </p>
-            </motion.div>
+            </motion.section>
 
             <div className='p-2 text-center text-muted-foreground mt-4'>
               <p className='bg-gold/30 rounded p-2'> Please contact user @bimo33 for more information</p>
