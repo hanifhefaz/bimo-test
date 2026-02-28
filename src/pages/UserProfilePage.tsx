@@ -216,8 +216,13 @@ export default function UserProfilePage() {
   const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && profile.pets.includes(i.id));
   const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && profile.assets.includes(i.id));
   const equippedBackground = profile.avatarItems?.background ? getAvatarItemById(profile.avatarItems.background) : null;
-  const isFriend = userProfile?.friends?.includes(userId || '');
-  const isPendingRequest = isFriendRequestPending(userProfile, profile);
+  // determine if we are friends by checking either side's friend list
+  const isFriend =
+    (userProfile?.friends?.includes(userId || '')) ||
+    (profile?.friends?.includes(userProfile?.uid || ''));
+
+  // pending only if there is a request and we are not yet friends
+  const isPendingRequest = !isFriend && isFriendRequestPending(userProfile, profile);
   const isSelf = userProfile?.uid === userId;
 
   // Get role status
@@ -352,6 +357,11 @@ export default function UserProfilePage() {
                 {isPendingRequest && (
                   <Button variant="secondary" size="sm" disabled className="flex-1">
                     Pending
+                  </Button>
+                )}
+                {isFriend && (
+                  <Button variant="secondary" size="sm" disabled className="flex-1">
+                    Friends
                   </Button>
                 )}
               </div>
