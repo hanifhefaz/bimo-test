@@ -7,7 +7,7 @@ import { STORE_ITEMS } from '@/lib/firebaseOperations';
 import { Store, Check, CheckCheck, Clock, Shield } from 'lucide-react';
 
 interface ChatMessageProps {
-  message: ChatMessageType & { senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff'; senderIsAdmin?: boolean; senderIsMentor?: boolean };
+  message: ChatMessageType & { senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' | 'chatadmin'; senderIsAdmin?: boolean; senderIsMentor?: boolean; senderIsChatAdmin?: boolean };
   isOwn: boolean;
 }
 
@@ -27,10 +27,11 @@ function MessageDeliveryStatus({ status }: { status?: string }) {
 }
 
 // Get username color based on role - universal across all chats
-function getUsernameColor(message: ChatMessageProps['message'] & { senderMerchantLevel?: string; senderIsStaff?: boolean; senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' }): string {
+function getUsernameColor(message: ChatMessageProps['message'] & { senderMerchantLevel?: string; senderIsStaff?: boolean; senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' | 'chatadmin' }): string {
   // staff first
   if (message.senderIsStaff || message.senderRole === 'staff') return 'text-black';
   if (message.senderIsAdmin || message.senderRole === 'admin') return 'text-destructive';
+  if (message.senderIsChatAdmin || message.senderRole === 'chatadmin') return 'text-yellow-500';
   if (message.senderIsMentor || message.senderRole === 'mentor') return 'text-pink-500';
   if (message.senderIsMerchant || message.senderRole === 'merchant') {
     // Pro merchant = gold, standard merchant = purple
@@ -46,6 +47,7 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
   };
 
   const isAdmin = message.senderIsAdmin || message.senderRole === 'admin';
+  const isChatAdmin = message.senderIsChatAdmin || message.senderRole === 'chatadmin';
   const isMerchant = message.senderIsMerchant || message.senderRole === 'merchant';
 
   if (message.type === 'system') {

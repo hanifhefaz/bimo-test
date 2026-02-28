@@ -24,6 +24,8 @@ export interface UserProfile {
   merchantExpiry?: number;
   mentorExpiry?: number;
   isAdmin: boolean;
+  /** Limited administrator that only has privileges inside chatrooms (kick/mute/ban). */
+  isChatAdmin?: boolean;
   /** Custom role for internal staff members. These users should have their username rendered in black. */
   isStaff?: boolean;
   isBanned: boolean;

@@ -158,6 +158,10 @@ export default function ChatRoomPage() {
         if (userProfile.isAdmin) {
           welcomeContent += '\n\n📋 Admin: Start gift contests with /startcontest <minutes> <prize>';
         }
+        if (userProfile.isAdmin || userProfile.isChatAdmin) {
+          // remind moderators of available commands
+          welcomeContent += '\n\n🛠️ Moderator commands: /kick <user>, /mute <user>, /warn <user>';
+        }
 
         // Send personal join messages visible only to this user
         try {
@@ -493,6 +497,7 @@ export default function ChatRoomPage() {
       senderMerchantLevel: userProfile.merchantLevel, // ensure color is accurate
       senderIsMentor: userProfile.isMentor,
       senderIsAdmin: userProfile.isAdmin,
+      senderIsChatAdmin: userProfile.isChatAdmin,
       senderIsStaff: userProfile.isStaff,
       content,
       type: 'message'
@@ -525,7 +530,7 @@ export default function ChatRoomPage() {
     // Moderator commands: /kick, /mute, /warn
     const isOwner = room.ownerId === userProfile.uid;
     const isMod = room.moderators?.includes(userProfile.uid);
-    const canModerate = isOwner || isMod || userProfile.isAdmin;
+    const canModerate = isOwner || isMod || userProfile.isAdmin || userProfile.isChatAdmin;
 
     // Admin commands: /ban, /unban
     if (command === 'ban' && userProfile.isAdmin && parts[1]) {

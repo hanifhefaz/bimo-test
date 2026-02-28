@@ -122,6 +122,7 @@ export default function TermsPage() {
                     <ul className="list-disc pl-5 space-y-2">
                       <li>Public chatrooms have a maximum capacity of 25 users.</li>
                       <li>Room owners and moderators can kick, mute, or warn users.</li>
+                      <li>Global chat administrators (visible on the People page) also have kick/mute/ban powers but lack full admin access.</li>
                       <li>Kicked users cannot rejoin for 10 minutes.</li>
                       <li>Muted users cannot send messages for 5 minutes.</li>
                       <li>Messages are limited to 100 words maximum.</li>

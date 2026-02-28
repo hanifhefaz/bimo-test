@@ -89,7 +89,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
         // Enrich with role flags if missing (merchant/admin/mentor/staff and merchantLevel)
         try {
           const missingIds = Array.from(new Set(filtered
-            .filter(m => m.senderId && (m.senderIsMerchant === undefined && m.senderIsMentor === undefined && m.senderIsAdmin === undefined && m.senderIsStaff === undefined))
+            .filter(m => m.senderId && (m.senderIsMerchant === undefined && m.senderIsMentor === undefined && m.senderIsAdmin === undefined && m.senderIsChatAdmin === undefined && m.senderIsStaff === undefined))
             .map(m => m.senderId)));
           if (missingIds.length > 0) {
             const profiles = await getUsersByIds(missingIds) as UserProfile[];
@@ -102,6 +102,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
                 senderIsMerchant: p.isMerchant,
                 senderIsMentor: p.isMentor,
                 senderIsAdmin: p.isAdmin,
+                senderIsChatAdmin: p.isChatAdmin,
                 senderIsStaff: p.isStaff,
                 senderMerchantLevel: (p as any).merchantLevel
               } as typeof m;

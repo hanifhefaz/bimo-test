@@ -25,7 +25,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 
 export default function PrivateMessagesPage() {
   // message type extended with merchant level so UI coloring can read it
-  type ChatMessageWithLevel = ChatMessageType & { senderMerchantLevel?: string; senderIsStaff?: boolean };
+  type ChatMessageWithLevel = ChatMessageType & { senderMerchantLevel?: string; senderIsStaff?: boolean; senderIsChatAdmin?: boolean };
   const { conversationId } = useParams<{ conversationId: string }>();
   const [searchParams] = useSearchParams();
   const friendId = searchParams.get('friendId');
@@ -60,7 +60,7 @@ export default function PrivateMessagesPage() {
       // Enrich messages with sender role flags if missing so username colors render correctly
       (async () => {
         try {
-          const missingIds = Array.from(new Set(msgs.filter(m => m.senderId && (m.senderIsMerchant === undefined && m.senderIsMentor === undefined && m.senderIsAdmin === undefined)).map(m => m.senderId)));
+          const missingIds = Array.from(new Set(msgs.filter(m => m.senderId && (m.senderIsMerchant === undefined && m.senderIsMentor === undefined && m.senderIsAdmin === undefined && m.senderIsChatAdmin === undefined)).map(m => m.senderId)));
           if (missingIds.length > 0) {
             const profiles = await getUsersByIds(missingIds) as UserProfile[];
             const profileMap = new Map(profiles.map(p => [p.uid, p] as [string, UserProfile]));
@@ -72,6 +72,7 @@ export default function PrivateMessagesPage() {
                 senderIsMerchant: p.isMerchant,
                 senderIsMentor: p.isMentor,
                 senderIsAdmin: p.isAdmin,
+                senderIsChatAdmin: p.isChatAdmin,
                 senderMerchantLevel: (p as any).merchantLevel,
                 senderIsStaff: p.isStaff
               } as typeof m;

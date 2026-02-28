@@ -62,6 +62,8 @@ export interface UserProfile {
   isMerchant: boolean;
   isMentor?: boolean;
   isAdmin: boolean;
+  /** chat moderators with limited global rights, only inside chat rooms */
+  isChatAdmin?: boolean;
   isStaff?: boolean;
   isBanned: boolean;
   banReason?: string;
@@ -512,6 +514,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       giftsReceived: 0,
       isMerchant: false,
       isAdmin: false,
+      isChatAdmin: false,
       isBanned: false,
       lastSeen: serverTimestamp(),
       isOnline: true,

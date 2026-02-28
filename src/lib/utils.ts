@@ -103,6 +103,7 @@ export function isEmail(str: string): boolean {
 // Standard pack = purple, Pro pack = gold, Elite pack = pink
 export function getUsernameColorClass(user?: {
   isAdmin?: boolean;
+  isChatAdmin?: boolean;
   isMentor?: boolean;
   isMerchant?: boolean;
   isStaff?: boolean;
@@ -118,6 +119,8 @@ export function getUsernameColorClass(user?: {
   // Staff should always be shown in black and take precedence over other roles.
   if (user.isStaff) return 'text-black';        // black for staff users
   if (user.isAdmin) return 'text-destructive'; // red for admins
+  // chat admins are beneath full admins but above everyone else; give them a yellow hue
+  if (user.isChatAdmin) return 'text-yellow-500';
   if (mentorActive) return 'text-pink-500';     // pink for mentors (Elite pack)
   if (merchantActive) {
     // Pro pack = gold, Standard pack = purple

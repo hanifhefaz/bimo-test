@@ -15,6 +15,7 @@ import { useNavigate } from 'react-router-dom';
 
 const categories = [
   { id: 'admins', label: 'Admins' },
+  { id: 'chatAdmins', label: 'Chat Admins' },
   { id: 'staff', label: 'Staff' },
   { id: 'merchants', label: 'Merchants' },
   { id: 'mentors', label: 'Mentors' },
@@ -24,6 +25,7 @@ const categories = [
 export default function PeoplePage() {
   const [loading, setLoading] = useState(true);
   const [admins, setAdmins] = useState<UserProfile[]>([]);
+  const [chatAdmins, setChatAdmins] = useState<UserProfile[]>([]);
   const [staff, setStaff] = useState<UserProfile[]>([]);
   const [merchants, setMerchants] = useState<UserProfile[]>([]);
   const [mentors, setMentors] = useState<UserProfile[]>([]);
@@ -41,7 +43,9 @@ export default function PeoplePage() {
         const usersRef = collection(db, 'users');
         const snap = await getDocs(query(usersRef, orderBy('username')));
         const all: UserProfile[] = snap.docs.map(d => ({ uid: d.id, ...(d.data() as any) } as UserProfile));
-        setAdmins(all.filter(u => u.isAdmin));
+        // regular/full admins should not include chat-only admins
+        setAdmins(all.filter(u => u.isAdmin && !u.isChatAdmin));
+        setChatAdmins(all.filter(u => u.isChatAdmin));
         setStaff(all.filter(u => u.isStaff));
         // merchants should exclude anyone who is also an active mentor
         setMerchants(all.filter(u => merchantActive(u) && !mentorActive(u)));
@@ -129,29 +133,21 @@ export default function PeoplePage() {
             People
           </h1>
           <p className="text-muted-foreground text-sm">
-            Browse all user categories: admins, staff, merchants, mentors.
+            Browse all user categories: admins, chat admins, staff, merchants, mentors.
           </p>
         </motion.div>
-
-        {loading ? (
-          <div className="space-y-4">
-            <Skeleton className="h-20 w-full rounded-xl" />
-            <Skeleton className="h-20 w-full rounded-xl" />
-            <Skeleton className="h-20 w-full rounded-xl" />
-          </div>
-        ) : (
-          <div className="divide-y divide-border">
-            {categories.map((cat) => (
-              <div key={cat.id} className="py-4">
-                <h2 className="text-lg font-semibold">{cat.label}</h2>
-                {cat.id === 'admins' && renderUserList(admins)}
-                {cat.id === 'staff' && renderUserList(staff)}
-                {cat.id === 'merchants' && renderUserList(merchants)}
-                {cat.id === 'mentors' && renderUserList(mentors)}
-              </div>
-            ))}
-          </div>
-        )}
+        <div className="divide-y divide-border">
+          {categories.map((cat) => (
+            <div key={cat.id} className="py-4">
+              <h2 className="text-lg font-semibold">{cat.label}</h2>
+              {cat.id === 'admins' && renderUserList(admins)}
+              {cat.id === 'chatAdmins' && renderUserList(chatAdmins)}
+              {cat.id === 'staff' && renderUserList(staff)}
+              {cat.id === 'merchants' && renderUserList(merchants)}
+              {cat.id === 'mentors' && renderUserList(mentors)}
+            </div>
+          ))}
+        </div>
       </div>
     </NewAppLayout>
   );

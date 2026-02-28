@@ -963,6 +963,7 @@ export interface ChatMessage {
   senderMerchantLevel?: string; // used to distinguish gold vs purple names
   senderIsMentor?: boolean;
   senderIsAdmin?: boolean;
+  senderIsChatAdmin?: boolean;
   senderIsStaff?: boolean; // internal staff flag
   content: string;
   type: 'message' | 'system' | 'gift' | 'game' | 'action';
