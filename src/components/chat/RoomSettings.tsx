@@ -150,7 +150,7 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
               <h3 className="font-semibold">Room Information</h3>
               
               <div>
-                <label className="text-sm text-muted-foreground">Topic</label>
+                <label className="text-body text-muted-foreground">Topic</label>
                 <Input
                   value={topic}
                   onChange={(e) => setTopic(e.target.value)}
@@ -160,7 +160,7 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
               </div>
 
               <div>
-                <label className="text-sm text-muted-foreground">Description</label>
+                <label className="text-body text-muted-foreground">Description</label>
                 <Textarea
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
@@ -208,7 +208,7 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
                 {/* Moderator list */}
                 <div className="space-y-2">
                   {(!room.moderators || room.moderators.length === 0) ? (
-                    <p className="text-sm text-muted-foreground text-center py-4">
+                    <p className="text-body text-muted-foreground text-center py-4">
                       No moderators assigned
                     </p>
                   ) : (
@@ -235,10 +235,15 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
             {/* Admin Commands Info */}
             <div className="p-4 rounded-xl bg-secondary/30 border border-white/5">
               <h4 className="font-medium mb-2">Moderator Commands</h4>
-              <ul className="text-sm text-muted-foreground space-y-1">
+              <ul className="text-body text-muted-foreground space-y-1">
                 <li>• <code>/kick [username]</code> - Remove user (10 min ban)</li>
                 <li>• <code>/mute [username]</code> - Mute user for 5 minutes</li>
                 <li>• <code>/warn [username]</code> - Send warning to user</li>
+                <li>• <code>/silence</code> - Silence room (owner/chat admin/global admin)</li>
+                <li>• <code>/unsilence</code> - Lift room silence</li>
+                <li>• <code>/startkick [username]</code> - Start community kick vote (cost: 0.05)</li>
+                <li>• <code>/votekick [username]</code> - Vote to kick for free (5 votes required)</li>
+                <li>• <code>/block [username]</code> / <code>/unblock [username]</code> - Hide or restore a user&apos;s messages</li>
               </ul>
             </div>
           </div>
@@ -247,3 +252,4 @@ export function RoomSettings({ room, onUpdate }: RoomSettingsProps) {
     </Sheet>
   );
 }
+

@@ -6,6 +6,7 @@ import { CustomAvatar } from '@/components/CustomAvatar';
 import Username from '@/components/Username';
 import { cn } from '@/lib/utils';
 import { UserProfile } from '@/contexts/AuthContext';
+import { useRealtimePresence, resolvePresence } from '@/hooks/useRealtimePresence';
 
 interface FriendItemProps {
   friend: UserProfile;
@@ -17,12 +18,15 @@ interface FriendItemProps {
 }
 
 export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, onRemove, delay = 0 }: FriendItemProps) {
+  const presenceMap = useRealtimePresence([friend]);
+  const presence = presenceMap[friend.uid] || resolvePresence(friend.presence, friend.isOnline);
+
   return (
     <motion.div
       initial={{ opacity: 0, x: -10 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ delay }}
-      className="flex items-center gap-2 rounded-xl bg-primary/10 hover:bg-muted/10 transition-colors"
+      className="surface-card flex items-center gap-2 p-2.5 hover:border-primary/30 transition-colors"
     >
       <div className="relative">
         <CustomAvatar
@@ -34,8 +38,8 @@ export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, 
         />
         <span className={cn(
           "absolute bottom-0 right-0 z-20 pointer-events-none w-4 h-4 rounded-full border-2 border-card",
-          presenceToColorClass(friend.presence || (friend.isOnline ? 'online' : 'offline'))
-        )} role="status" title={presenceLabel(friend.presence || (friend.isOnline ? 'online' : 'offline'))} />
+          presenceToColorClass(presence)
+        )} role="status" title={presenceLabel(presence)} />
       </div>
 
       <div className="flex-1 min-w-0">
@@ -49,11 +53,11 @@ export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, 
               friend.merchantLevel === 'pro' ? 'bg-gold' : 'bg-violet-500'
             }`} title="Merchant">M</span>
           )}
-          <Username user={friend} className="font-medium text-sm whitespace-nowrap" />
+          <Username user={friend} className="font-medium text-body whitespace-nowrap" />
 
           <div className="w-full overflow-hidden">
             <div className="relative w-full">
-              <span className="text-xs text-muted-foreground marquee-text">
+              <span className="text-caption text-muted-foreground marquee-text">
                 {friend.statusMessage ? friend.statusMessage : 'No status set...'}
               </span>
             </div>
@@ -65,7 +69,7 @@ export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, 
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8"
+          className="tap-target h-9 w-9"
           onClick={onViewProfile}
           title="View Profile"
         >
@@ -77,7 +81,7 @@ export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, 
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8 relative"
+          className="tap-target h-9 w-9 relative"
           onClick={onMessage}
         >
           <MessageCircle className="w-4 h-4" />
@@ -93,7 +97,7 @@ export function FriendItem({ friend, unreadCount = 0, onMessage, onViewProfile, 
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8 text-destructive"
+          className="tap-target h-9 w-9 text-destructive"
           onClick={onRemove}
           title="Remove Friend"
         >

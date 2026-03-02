@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Chatroom, joinChatroom, sendMessage, getMostExpensivePet, getMostExpensiveAsset } from '@/lib/firebaseOperations';
+import { Chatroom, joinChatroom, sendMessage, getMostExpensivePet, getMostExpensiveAsset, COMPANION_ITEMS } from '@/lib/firebaseOperations';
 import { Button } from '@/components/ui/button';
 import { Users, Lock, Settings, LogIn } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -15,6 +15,13 @@ interface ChatroomCardProps {
   onSettings?: () => void;
   delay?: number;
 }
+
+const COMPANION_GREETING_LINES = [
+  'we just arrived and already improved the room stats.',
+  'hello chat, keep it fun and stack those wins.',
+  'new entrance unlocked. vibes increased instantly.',
+  'we are here. confidence level: absolutely illegal.'
+];
 
 export function ChatroomCard({
   room,
@@ -35,34 +42,51 @@ export function ChatroomCard({
     if (!userProfile) return;
 
     try {
-      await joinChatroom(room.id, userProfile.uid);
+      const wasNewlyAdded = await joinChatroom(room.id, userProfile.uid);
+      if (wasNewlyAdded) {
+        // Get badge and most expensive pet/asset for announcement
+        const badge = getBadgeForLevel(userProfile.level);
+        const expensivePet = getMostExpensivePet(userProfile.pets);
+        const expensiveAsset = getMostExpensiveAsset(userProfile.assets);
+        const equippedCompanion = COMPANION_ITEMS.find((c) => c.id === userProfile.equippedCompanionId);
 
-      // Get badge and most expensive pet/asset for announcement
-      const badge = getBadgeForLevel(userProfile.level);
-      const expensivePet = getMostExpensivePet(userProfile.pets);
-      const expensiveAsset = getMostExpensiveAsset(userProfile.assets);
+        // Build announcement message in requested format
+        let announcement = `(${badge.name}) ${userProfile.username} (${userProfile.level}) has entered the room`;
+        if (expensiveAsset) {
+          // embed an asset token for inline animation
+          announcement += ` using a <asset:${expensiveAsset.asset.id}>`;
+        }
+        if (expensivePet) {
+          // embed pet token for inline animation
+          announcement += ` with a <pet:${expensivePet.pet.id}>`;
+        }
+        if (equippedCompanion) {
+          announcement += ` and accompanied by <companion:${equippedCompanion.id}>`;
+        }
+        announcement += '!';
 
-      // Build announcement message in requested format
-      let announcement = `(${badge.name}) ${userProfile.username} (${userProfile.level}) has entered the room`;
-      if (expensiveAsset) {
-        // embed an asset token for inline animation
-        announcement += ` using a <asset:${expensiveAsset.asset.id}>`;
+        // Send join announcement
+        sendMessage(room.id, {
+          roomId: room.id,
+          senderId: 'system',
+          senderName: 'System',
+          senderAvatar: '📢',
+          content: announcement,
+          type: 'system'
+        });
+
+        if (equippedCompanion) {
+          const line = COMPANION_GREETING_LINES[Math.floor(Math.random() * COMPANION_GREETING_LINES.length)];
+          sendMessage(room.id, {
+            roomId: room.id,
+            senderId: 'system',
+            senderName: `${userProfile.username}'s companion`,
+            senderAvatar: equippedCompanion.emoji,
+            content: `${userProfile.username}'s companion <companion:${equippedCompanion.id}> ${equippedCompanion.name}: ${line}`,
+            type: 'action'
+          });
+        }
       }
-      if (expensivePet) {
-        // embed pet token for inline animation
-        announcement += ` with a <pet:${expensivePet.pet.id}>`;
-      }
-      announcement += '!';
-
-      // Send join announcement
-      sendMessage(room.id, {
-        roomId: room.id,
-        senderId: 'system',
-        senderName: 'System',
-        senderAvatar: '📢',
-        content: announcement,
-        type: 'system'
-      });
 
       toast.success('Joined chatroom!');
       navigate(`/chat/${room.id}`);
@@ -86,18 +110,18 @@ export function ChatroomCard({
               <h3 className="font-semibold">{room.name}</h3>
               {room.isPrivate && <Lock className="w-3 h-3 text-muted-foreground" />}
             </div>
-            <p className="text-xs text-muted-foreground">by {room.ownerName}</p>
+            <p className="text-caption text-muted-foreground">by {room.ownerName}</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1 text-caption text-muted-foreground">
           <Users className="w-3 h-3" />
           <span>{room.participants.length}</span>
         </div>
       </div>
 
       {room.topic && (
-        <p className="text-sm text-muted-foreground mb-3 line-clamp-2">{room.topic}</p>
+        <p className="text-body text-muted-foreground mb-3 line-clamp-2">{room.topic}</p>
       )}
 
       <div className="flex gap-2">
@@ -121,3 +145,5 @@ export function ChatroomCard({
     </motion.div>
   );
 }
+
+

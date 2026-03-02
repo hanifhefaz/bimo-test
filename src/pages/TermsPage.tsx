@@ -321,7 +321,7 @@ export default function TermsPage() {
             </TabsContent>
           </Tabs>
 
-          <p className="mt-8 text-sm text-muted-foreground text-center">
+          <p className="mt-8 text-body text-muted-foreground text-center">
             Last updated: {new Date().toLocaleDateString()}
           </p>
         </motion.div>
@@ -329,3 +329,4 @@ export default function TermsPage() {
     </div>
   );
 }
+

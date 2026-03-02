@@ -1,19 +1,18 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
   query,
   where,
-  setDoc,
   writeBatch,
   runTransaction,
   serverTimestamp,
-  addDoc,
   limit,
   increment
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { updateCredits, txParticipants } from './firebaseOperations';
+import { txParticipants } from './firebaseOperations';
 
 export interface Voucher {
   id?: string;
@@ -74,25 +73,17 @@ export async function generateVouchers(adminId: string, amount: number, quantity
     createdAt: now
   });
 
+  const generatedHashes = new Set<string>();
   for (let i = 0; i < quantity; i++) {
-    // Ensure we don't accidentally create a duplicate hashed code
     let plain = generate14DigitCode();
     let hashed = await sha256Hex(plain);
-
-    // Retry a few times if a collision is found
-    let tries = 0;
-    while (tries < 5) {
-      const q = query(collection(db, 'vouchers'), where('hashed', '==', hashed), limit(1));
-      const existing = await getDocs(q);
-      if (existing.empty) break; // unique
-      // collision — regenerate
+    while (generatedHashes.has(hashed)) {
       plain = generate14DigitCode();
       hashed = await sha256Hex(plain);
-      tries++;
     }
+    generatedHashes.add(hashed);
 
-    const id = `voucher_${now}_${i}_${Math.floor(Math.random() * 1e6)}`;
-    const docRef = doc(vouchersRef, id);
+    const docRef = doc(vouchersRef, hashed);
 
     wb.set(docRef, {
       hashed,
@@ -118,28 +109,30 @@ export async function redeemVoucher(userId: string, username: string, codePlain:
 
   const hashed = await sha256Hex(trimmed);
 
-  // Find voucher by hashed value
-  const vouchersRef = collection(db, 'vouchers');
-  const q = query(vouchersRef, where('hashed', '==', hashed), limit(1));
-  const snapshot = await getDocs(q);
+  // Prefer direct doc lookup by hash. Fallback query supports legacy docs with random IDs.
+  let voucherDocRef = doc(db, 'vouchers', hashed);
+  let voucherSnap = await getDoc(voucherDocRef);
+  if (!voucherSnap.exists()) {
+    const q = query(collection(db, 'vouchers'), where('hashed', '==', hashed), limit(1));
+    const snapshot = await getDocs(q);
+    if (snapshot.empty) return { success: false, message: 'Invalid voucher code' };
+    voucherDocRef = doc(db, 'vouchers', snapshot.docs[0].id);
+    voucherSnap = snapshot.docs[0];
+  }
 
-  if (snapshot.empty) return { success: false, message: 'Invalid voucher code' };
-
-  const voucherDoc = snapshot.docs[0];
-  const voucherData = voucherDoc.data() as Voucher;
+  const voucherData = voucherSnap.data() as Voucher;
 
   if (voucherData.redeemed) return { success: false, message: 'This voucher has already been used' };
 
   // Use transaction to mark redeemed and credit the user (atomic)
   try {
     await runTransaction(db, async (tx) => {
-      const vRef = doc(db, 'vouchers', voucherDoc.id);
-      const vSnap = await tx.get(vRef as any);
+      const vSnap = await tx.get(voucherDocRef as any);
       if (!vSnap.exists()) throw new Error('Voucher not found');
       const v = vSnap.data() as Voucher;
       if (v.redeemed) throw new Error('Already redeemed');
 
-      tx.update(vRef as any, {
+      tx.update(voucherDocRef as any, {
         redeemed: true,
         redeemedBy: userId,
         redeemedByUsername: username,
@@ -172,3 +165,4 @@ export async function redeemVoucher(userId: string, username: string, codePlain:
     return { success: false, message: err?.message || 'Failed to redeem voucher' };
   }
 }
+

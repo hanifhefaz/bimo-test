@@ -15,6 +15,20 @@ export interface UserProfile {
   giftsReceived: number;
   pets: string[];
   assets: string[];
+  assetQuantities?: { [key: string]: number };
+  petExpiryMap?: { [key: string]: number };
+  assetExpiryMap?: { [key: string]: number[] };
+  ownedCompanions?: string[];
+  equippedCompanionId?: string | null;
+  companionSettings?: {
+    enabled: boolean;
+    publicReactions: boolean;
+  };
+  companionState?: {
+    lastPublicAt?: number;
+    lastTriggerAtByType?: { [key: string]: number };
+    winStreak?: number;
+  };
   avatar: AvatarConfig;
   isMerchant: boolean;
   isMentor?: boolean;
@@ -113,7 +127,7 @@ export interface StoreItem {
   name: string;
   description: string;
   price: number;
-  type: 'pet' | 'asset' | 'avatar' | 'merchant';
+  type: 'pet' | 'asset' | 'avatar' | 'merchant' | 'companion';
   category?: 'background' | 'face' | 'shirt' | 'pants' | 'shoes' | 'hair' | 'skin';
   emoji?: string;
   imageUrl?: string;
@@ -124,7 +138,7 @@ export interface StoreItem {
 export interface GameSession {
   id: string;
   roomId: string;
-  gameType: 'lowcard' | 'dice' | 'bimo' | 'luckynumber';
+  gameType: 'lowcard' | 'dice' | 'bimo' | 'luckynumber' | 'higherlower';
   status: 'waiting' | 'playing' | 'finished';
   betAmount: number;
   players: GamePlayer[];

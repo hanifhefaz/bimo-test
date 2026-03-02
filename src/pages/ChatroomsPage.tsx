@@ -31,7 +31,8 @@ import {
   Chatroom,
   initializeDefaultRooms,
   getMostExpensivePet,
-  getMostExpensiveAsset
+  getMostExpensiveAsset,
+  COMPANION_ITEMS
 } from '@/lib/firebaseOperations';
 
 // helper for testing and reuse
@@ -60,6 +61,12 @@ import {
 } from '@/components/ui/collapsible';
 
 const MAX_ROOM_USERS = 25;
+const COMPANION_GREETING_LINES = [
+  'we just arrived and already improved the room stats.',
+  'hello chat, keep it fun and stack those wins.',
+  'new entrance unlocked. vibes increased instantly.',
+  'we are here. confidence level: absolutely illegal.'
+];
 
 export default function ChatroomsPage() {
   const { userProfile } = useAuth();
@@ -153,6 +160,7 @@ export default function ChatroomsPage() {
         const badge = getBadgeForLevel(userProfile.level);
         const expensivePet = getMostExpensivePet(userProfile.pets);
         const expensiveAsset = getMostExpensiveAsset(userProfile.assets);
+        const equippedCompanion = COMPANION_ITEMS.find((c) => c.id === userProfile.equippedCompanionId);
 
         // Build announcement message in requested format
         let announcement = ` ${room.name}:  ${userProfile.username} [${userProfile.level}] (${badge.name}) has entered the room`;
@@ -163,6 +171,9 @@ export default function ChatroomsPage() {
         if (expensivePet) {
           // embed a pet token; the chat renderer will replace this with an inline animation
           announcement += ` with a <pet:${expensivePet.pet.id}>`;
+        }
+        if (equippedCompanion) {
+          announcement += ` and accompanied by <companion:${equippedCompanion.id}>`;
         }
         announcement += '!';
 
@@ -175,6 +186,17 @@ export default function ChatroomsPage() {
           content: announcement,
           type: 'system'
         });
+        if (equippedCompanion) {
+          const line = COMPANION_GREETING_LINES[Math.floor(Math.random() * COMPANION_GREETING_LINES.length)];
+          sendMessage(room.id, {
+            roomId: room.id,
+            senderId: 'system',
+            senderName: `${userProfile.username}'s companion`,
+            senderAvatar: equippedCompanion.emoji,
+            content: `${userProfile.username}'s companion <companion:${equippedCompanion.id}> ${equippedCompanion.name}: ${line}`,
+            type: 'action'
+          });
+        }
       }
 
       navigate(`/chat/${room.id}`);
@@ -208,7 +230,7 @@ export default function ChatroomsPage() {
     .filter(r => {
       const n = (r.name || '').toLowerCase();
       const t = (r.topic || '').toLowerCase();
-      const isGameRoom = n.includes('game') || n.includes('dice') || n.includes('bimo') || n.includes('lowcard') || n.includes('luckynumber') || t.includes('game');
+      const isGameRoom = n.includes('game') || n.includes('dice') || n.includes('bimo') || n.includes('lowcard') || n.includes('luckynumber') || n.includes('higherlower') || t.includes('game');
       // Exclude user-created rooms from games section
       return isGameRoom && r.ownerId !== userProfile?.uid;
     })
@@ -249,7 +271,7 @@ export default function ChatroomsPage() {
           {room.isPrivate && <Lock className="w-3 h-3 text-muted-foreground" />}
           <span className="font-medium text-sm">{room.name}</span>
         </span>
-        <span className={`text-xs ${isFull ? 'text-destructive' : 'text-muted-foreground'}`}>
+        <span className={`text-caption ${isFull ? 'text-destructive' : 'text-muted-foreground'}`}>
           {room.participants.length}/{MAX_ROOM_USERS}
         </span>
       </button>
@@ -277,7 +299,7 @@ export default function ChatroomsPage() {
           <span className="font-semibold text-sm flex items-center gap-2 text-white-foreground">
             {icon}
             {title}
-            <span className="text-xs">({rooms.length})</span>
+            <span className="text-caption">({rooms.length})</span>
           </span>
           {isOpen ? (
             <ChevronDown className="w-4 h-4 text-muted-foreground" />
@@ -288,7 +310,7 @@ export default function ChatroomsPage() {
       </CollapsibleTrigger>
       <CollapsibleContent>
         {rooms.length === 0 ? (
-          <p className="text-xs text-muted-foreground/50 text-center py-3 px-3">{emptyText}</p>
+          <p className="text-caption text-muted-foreground/50 text-center py-3 px-3">{emptyText}</p>
         ) : (
           <div className="mt-1">
             {rooms.map((room) => (
@@ -309,7 +331,7 @@ export default function ChatroomsPage() {
           animate={{ opacity: 1, y: 0 }}
           className="flex items-center justify-between mb-4"
         >
-          <h1 className="font-display text-2xl font-bold">Chatrooms</h1>
+          <h1 className="font-display heading-tight text-2xl font-bold">Chatrooms</h1>
 
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
@@ -383,11 +405,11 @@ export default function ChatroomsPage() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
             >
-              <h3 className="font-semibold text-sm mb-3 text-muted-foreground">
+              <h3 className="heading-tight font-semibold text-body mb-3 text-muted-foreground">
                 Search Results ({searchedRooms.length})
               </h3>
               {searchedRooms.length === 0 ? (
-                <p className="text-center py-8 text-muted-foreground">No rooms found</p>
+                <p className="text-body text-center py-8 text-muted-foreground">No rooms found</p>
               ) : (
                 <div>
                   {searchedRooms.map((room) => (
@@ -421,7 +443,7 @@ export default function ChatroomsPage() {
                     <span className="flex items-center gap-1">
                       Hot Rooms
                     </span>
-                    <span className="text-xs">({hotRooms.length})</span>
+                    <span className="text-caption">({hotRooms.length})</span>
                   </span>
                   {hotOpen ? (
                     <ChevronDown className="w-4 h-4 text-muted-foreground" />
@@ -432,7 +454,7 @@ export default function ChatroomsPage() {
               </CollapsibleTrigger>
               <CollapsibleContent>
                 {hotRooms.length === 0 ? (
-                  <p className="text-xs text-muted-foreground/50 text-center py-3 px-3">No hot rooms</p>
+                  <p className="text-caption text-muted-foreground/50 text-center py-3 px-3">No hot rooms</p>
                 ) : (
                   <div className="mt-1">
                     {hotRooms.slice(0, hotLimit).map((room) => (

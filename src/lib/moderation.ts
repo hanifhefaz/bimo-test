@@ -1,8 +1,9 @@
-import { ref, get, set, remove } from 'firebase/database';
+import { ref, get, set, remove, runTransaction, onValue } from 'firebase/database';
 import { rtdb } from './firebase';
 
 const MUTE_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const KICK_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+const VOTE_KICK_DURATION_MS = 60 * 1000; // 1 minute
 
 export interface MuteRecord {
   mutedBy: string;
@@ -14,6 +15,24 @@ export interface KickRecord {
   kickedBy: string;
   kickedAt: number;
   canRejoinAt: number;
+}
+
+export interface RoomSilenceRecord {
+  active: boolean;
+  silencedBy: string;
+  silencedByName: string;
+  silencedAt: number;
+}
+
+export interface VoteKickRecord {
+  targetUserId: string;
+  targetUsername: string;
+  startedBy: string;
+  startedByUsername: string;
+  startedAt: number;
+  expiresAt: number;
+  requiredVotes: number;
+  votes: Record<string, true>;
 }
 
 // Mute a user in a room
@@ -117,4 +136,127 @@ export async function unmuteUser(roomId: string, userId: string): Promise<void> 
 export async function clearKickRecord(roomId: string, userId: string): Promise<void> {
   const kickRef = ref(rtdb, `moderation/kicks/${roomId}/${userId}`);
   await remove(kickRef);
+}
+
+export async function setRoomSilence(roomId: string, active: boolean, silencedBy: string, silencedByName: string): Promise<void> {
+  const silenceRef = ref(rtdb, `moderation/roomSilence/${roomId}`);
+  if (!active) {
+    await remove(silenceRef);
+    return;
+  }
+
+  await set(silenceRef, {
+    active: true,
+    silencedBy,
+    silencedByName,
+    silencedAt: Date.now()
+  } as RoomSilenceRecord);
+}
+
+export function subscribeToRoomSilence(roomId: string, callback: (state: RoomSilenceRecord | null) => void): () => void {
+  const silenceRef = ref(rtdb, `moderation/roomSilence/${roomId}`);
+  const unsubscribe = onValue(silenceRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      callback(null);
+      return;
+    }
+    callback(snapshot.val() as RoomSilenceRecord);
+  });
+  return unsubscribe;
+}
+
+export async function startVoteKick(
+  roomId: string,
+  targetUserId: string,
+  targetUsername: string,
+  startedBy: string,
+  startedByUsername: string,
+  requiredVotes: number = 5
+): Promise<{ success: boolean; message: string; votes?: number; requiredVotes?: number }> {
+  const voteKickRef = ref(rtdb, `moderation/votekicks/${roomId}/${targetUserId}`);
+  try {
+    const result = await runTransaction(voteKickRef, (current: VoteKickRecord | null) => {
+      if (current) return current;
+      return {
+        targetUserId,
+        targetUsername,
+        startedBy,
+        startedByUsername,
+        startedAt: Date.now(),
+        expiresAt: Date.now() + VOTE_KICK_DURATION_MS,
+        requiredVotes,
+        votes: { [startedBy]: true }
+      } as VoteKickRecord;
+    });
+
+    if (!result.committed || !result.snapshot.exists()) {
+      return { success: false, message: 'Vote-kick already active for this user' };
+    }
+
+    const val = result.snapshot.val() as VoteKickRecord;
+    const votes = Object.keys(val.votes || {}).length;
+    return { success: true, message: 'Vote-kick started', votes, requiredVotes: val.requiredVotes };
+  } catch (error) {
+    console.error('Failed to start vote-kick:', error);
+    return { success: false, message: 'Failed to start vote-kick' };
+  }
+}
+
+export async function castVoteKick(
+  roomId: string,
+  targetUserId: string,
+  voterId: string
+): Promise<{ success: boolean; message: string; votes?: number; requiredVotes?: number; reached?: boolean }> {
+  const voteKickRef = ref(rtdb, `moderation/votekicks/${roomId}/${targetUserId}`);
+
+  try {
+    const result = await runTransaction(voteKickRef, (current: VoteKickRecord | null) => {
+      if (!current) return current;
+      if (Date.now() > (current.expiresAt || 0)) return null;
+      const existingVotes = current.votes || {};
+      if (existingVotes[voterId]) return current;
+
+      return {
+        ...current,
+        votes: {
+          ...existingVotes,
+          [voterId]: true
+        }
+      } as VoteKickRecord;
+    });
+
+    if (!result.snapshot.exists()) {
+      return { success: false, message: 'No active vote-kick found (expired or cancelled)' };
+    }
+
+    const record = result.snapshot.val() as VoteKickRecord;
+    const votes = Object.keys(record.votes || {}).length;
+    const requiredVotes = record.requiredVotes || 5;
+    return {
+      success: true,
+      message: 'Vote recorded',
+      votes,
+      requiredVotes,
+      reached: votes >= requiredVotes
+    };
+  } catch (error) {
+    console.error('Failed to cast vote-kick vote:', error);
+    return { success: false, message: 'Failed to cast vote' };
+  }
+}
+
+export async function cancelVoteKick(roomId: string, targetUserId: string): Promise<void> {
+  const voteKickRef = ref(rtdb, `moderation/votekicks/${roomId}/${targetUserId}`);
+  await remove(voteKickRef);
+}
+
+export function subscribeToVoteKicks(
+  roomId: string,
+  callback: (records: Record<string, VoteKickRecord>) => void
+): () => void {
+  const voteKicksRef = ref(rtdb, `moderation/votekicks/${roomId}`);
+  const unsubscribe = onValue(voteKicksRef, (snapshot) => {
+    callback((snapshot.val() || {}) as Record<string, VoteKickRecord>);
+  });
+  return unsubscribe;
 }

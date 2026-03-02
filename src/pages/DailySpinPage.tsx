@@ -1,5 +1,5 @@
-import { useState } from 'react';
 import { motion } from 'framer-motion';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { NewAppLayout } from '@/components/layout/NewAppLayout';
 import { Loader2 } from 'lucide-react';
@@ -8,7 +8,7 @@ import Confetti from '@/components/DailySpin/Confetti';
 import { toast } from 'sonner';
 import { doc, updateDoc, serverTimestamp, collection, addDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { updateCredits, STORE_ITEMS, txParticipants, addXP } from '@/lib/firebaseOperations';
+import { updateCredits, STORE_ITEMS, txParticipants, addXP, triggerCompanionEvent } from '@/lib/firebaseOperations';
 
 interface SpinReward {
   type: 'credits' | 'asset' | 'pet' | 'xp';
@@ -71,21 +71,30 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
   const [spinning, setSpinning] = useState(false);
   const [rotation, setRotation] = useState(0);
   const [reward, setReward] = useState<SpinReward | null>(null);
+  const [localLockedAt, setLocalLockedAt] = useState<number | null>(null);
+  const spinTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isEmbedded = !!hideHeader;
 
   if (!userProfile) return null;
 
   // ✅ single source of truth
   const canSpin = () => {
-    if (!userProfile.lastDailySpin) return true;
-
-    const lastSpin =
-      userProfile.lastDailySpin.toDate?.() ??
-      new Date(userProfile.lastDailySpin);
-
-    return Date.now() - lastSpin.getTime() >= 24 * 60 * 60 * 1000;
+    const profileLastSpin = userProfile.lastDailySpin
+      ? (userProfile.lastDailySpin.toDate?.()?.getTime?.() ?? new Date(userProfile.lastDailySpin).getTime())
+      : 0;
+    const lastSpinAt = Math.max(profileLastSpin || 0, localLockedAt || 0);
+    if (!lastSpinAt) return true;
+    return Date.now() - lastSpinAt >= 24 * 60 * 60 * 1000;
   };
 
   const spinAvailable = canSpin();
+  useEffect(() => {
+    return () => {
+      if (spinTimeoutRef.current) {
+        clearTimeout(spinTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleSpin = async () => {
     if (!spinAvailable || spinning) {
@@ -95,6 +104,7 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
 
     setSpinning(true);
     setReward(null);
+    setLocalLockedAt(Date.now());
 
     try {
       // 🔒 lock immediately (prevents refresh abuse)
@@ -121,12 +131,13 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
       const seg = segments[pickedIndex];
       const randomOffset = Math.random() * (seg.end - seg.start);
       const targetAngle = seg.start + randomOffset;
-      const newRotation = rotation + baseRotation + (360 - targetAngle);
-
-      setRotation(newRotation);
+      setRotation(prev => prev + baseRotation + (360 - targetAngle));
 
       // ⏳ wait for animation
-      setTimeout(async () => {
+      if (spinTimeoutRef.current) {
+        clearTimeout(spinTimeoutRef.current);
+      }
+      spinTimeoutRef.current = setTimeout(async () => {
         try {
           // 🎁 apply reward
           if (selectedReward.type === 'credits' && selectedReward.amount) {
@@ -172,8 +183,13 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
                   description: `Daily spin reward: ${item.name}`,
                   timestamp: serverTimestamp()
                 });
+                try {
+                  await triggerCompanionEvent(userProfile.uid, 'rare_reward_obtained', { itemName: item.name });
+                } catch (e) {
+                  console.warn('Failed to trigger companion rare reward event (spin):', e);
+                }
               } else {
-                await updateCredits(userProfile.uid, 10);
+                await updateCredits(userProfile.uid, 0.10);
                 // Record transaction for duplicate reward converted to credits
                 await addDoc(collection(db, 'transactions'), {
                   from: 'system',
@@ -197,6 +213,7 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
           toast.error('Failed to apply reward');
         } finally {
           setSpinning(false);
+          spinTimeoutRef.current = null;
         }
       }, 4000);
     } catch {
@@ -229,18 +246,13 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
         {/* Spin wheel component */}
         <div className="relative">
           {!hideHeader && (
-            <div className="mb-4 text-sm text-muted-foreground">
+            <div className="mb-4 text-body text-muted-foreground">
               Tap <strong>Spin</strong> on the wheel to play. You get one free spin every 24 hours.
             </div>
           )}
 
           <div className="flex justify-center">
             <div className="relative">
-              {/* Pointer */}
-              <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-30">
-                <div className="w-0 h-0 border-l-[14px] border-r-[14px] border-t-[24px] border-l-transparent border-r-transparent border-t-primary shadow" />
-              </div>
-
               <div className="relative">
                 <SpinWheel rewards={SPIN_REWARDS} rotation={rotation} spinning={spinning} size={320} showLabels={showLabels} />
 
@@ -260,7 +272,7 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
                 </button>
 
                 {/* Confetti on win */}
-                {reward && !spinning && <Confetti />}
+                {!isEmbedded && reward && !spinning && <Confetti />}
               </div>
             </div>
           </div>
@@ -268,7 +280,7 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
       </motion.div>
 
       {/* Reward */}
-      {reward && (
+      {!isEmbedded && reward && (
         <motion.div
           initial={{ opacity: 0, scale: 0.5 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -282,7 +294,7 @@ export function DailySpinSection({ hideHeader, showLabels = true }: DailySpinSec
 
       {/* bottom button removed; wheel center handles spin */}
       {!spinAvailable && !spinning && (
-        <p className="text-sm text-muted-foreground mt-4">
+        <p className="text-body text-muted-foreground mt-4">
           Next spin available in 24 hours
         </p>
       )}
@@ -297,3 +309,4 @@ export default function DailySpinPage() {
     </NewAppLayout>
   );
 }
+

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Send, Gift, Gamepad2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -20,7 +20,7 @@ interface ChatInputProps {
 }
 
 // types for suit so we can expand easily
-type Suit = 'spades' | 'hearts' | 'clubs' | 'diamonds' | 'flag' | 'king';
+type Suit = 'spades' | 'hearts' | 'clubs' | 'diamonds';
 
 export function ChatInput({ onSend, onGift, disabled, bimoActive = false, ownedEmoticonPacks = [] }: ChatInputProps) {
   const [message, setMessage] = useState('');
@@ -31,6 +31,9 @@ export function ChatInput({ onSend, onGift, disabled, bimoActive = false, ownedE
   const [selectedSuit, setSelectedSuit] = useState<Suit | null>(null);
   const [betAmount, setBetAmount] = useState('');
   const [betError, setBetError] = useState('');
+
+  // track local bets for the current Bimo round to prevent more than two suits from UI
+  const [localBets, setLocalBets] = useState<Record<string, number>>({});
 
   // fixed amount buttons
   const FIXED_AMOUNTS = [0.05, 0.1, 0.5, 1, 5, 10];
@@ -57,7 +60,17 @@ export function ChatInput({ onSend, onGift, disabled, bimoActive = false, ownedE
       setBetError('Please select a suit first');
       return;
     }
+    // enforce local two-suit limit
+    const isNew = !localBets[selectedSuit];
+    const distinct = Object.keys(localBets).length;
+    if (isNew && distinct >= 2) {
+      setBetError('You may only bet on up to two different suits this round');
+      return;
+    }
+
     onSend(`!b ${selectedSuit} ${amt}`);
+    // update local record
+    setLocalBets(prev => ({ ...prev, [selectedSuit!]: (prev[selectedSuit!] || 0) + amt }));
     // reset selection after placing
     setSelectedSuit(null);
   };
@@ -72,8 +85,17 @@ const confirmBet = () => {
 
   if (!selectedSuit) return;
 
+  // local limit check
+  const isNew = !localBets[selectedSuit];
+  const distinct = Object.keys(localBets).length;
+  if (isNew && distinct >= 2) {
+    setBetError('You may only bet on up to two different suits this round');
+    return;
+  }
+
   const cmd = `!b ${selectedSuit} ${amt}`;
   onSend(cmd);
+  setLocalBets(prev => ({ ...prev, [selectedSuit!]: (prev[selectedSuit!] || 0) + amt }));
 
   setAmountDialogOpen(false);
   setSelectedSuit(null);
@@ -90,6 +112,11 @@ const confirmBet = () => {
     inputRef.current?.focus();
   };
 
+  // clear local bets when bimo phase changes
+  useEffect(() => {
+    if (!bimoActive) setLocalBets({});
+  }, [bimoActive]);
+
   return (
     <form onSubmit={handleSubmit} className="flex items-center gap-2 p-3 glass-strong border-t border-white/10">
       {bimoActive && (
@@ -105,15 +132,16 @@ const confirmBet = () => {
             align="start"
           >
             <div className="space-y-2">
-              <p className="text-xs sm:text-sm text-muted-foreground mb-2">
+              <p className="text-xs sm:text-body text-muted-foreground mb-2">
                 Bet on a suit:
               </p>
 
-              <div className="grid grid-cols-3 sm:grid-cols-3 gap-2 sm:gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-4">
                 <button
                   type="button"
                   onClick={() => handleSuitClick('spades')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='spades'?'ring-2 ring-primary':''}`}
+                  disabled={bimoActive && Object.keys(localBets).length >= 2 && !localBets['spades']}
+                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='spades'?'ring-2 ring-primary':''} ${bimoActive && Object.keys(localBets).length >= 2 && !localBets['spades'] ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <span className="text-xl sm:text-2xl">♠</span>
                   <span className="text-sm sm:text-base">Spades</span>
@@ -122,7 +150,8 @@ const confirmBet = () => {
                 <button
                   type="button"
                   onClick={() => handleSuitClick('hearts')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors text-red-400 ${selectedSuit==='hearts'?'ring-2 ring-primary':''}`}
+                  disabled={bimoActive && Object.keys(localBets).length >= 2 && !localBets['hearts']}
+                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors text-red-400 ${selectedSuit==='hearts'?'ring-2 ring-primary':''} ${bimoActive && Object.keys(localBets).length >= 2 && !localBets['hearts'] ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <span className="text-xl sm:text-2xl">♥</span>
                   <span className="text-sm sm:text-base">Hearts</span>
@@ -131,7 +160,8 @@ const confirmBet = () => {
                 <button
                   type="button"
                   onClick={() => handleSuitClick('clubs')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='clubs'?'ring-2 ring-primary':''}`}
+                  disabled={bimoActive && Object.keys(localBets).length >= 2 && !localBets['clubs']}
+                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='clubs'?'ring-2 ring-primary':''} ${bimoActive && Object.keys(localBets).length >= 2 && !localBets['clubs'] ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <span className="text-xl sm:text-2xl">♣</span>
                   <span className="text-sm sm:text-base">Clubs</span>
@@ -140,32 +170,16 @@ const confirmBet = () => {
                 <button
                   type="button"
                   onClick={() => handleSuitClick('diamonds')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors text-red-400 ${selectedSuit==='diamonds'?'ring-2 ring-primary':''}`}
+                  disabled={bimoActive && Object.keys(localBets).length >= 2 && !localBets['diamonds']}
+                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors text-red-400 ${selectedSuit==='diamonds'?'ring-2 ring-primary':''} ${bimoActive && Object.keys(localBets).length >= 2 && !localBets['diamonds'] ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   <span className="text-xl sm:text-2xl">♦</span>
                   <span className="text-sm sm:text-base">Diamonds</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => handleSuitClick('flag')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='flag'?'ring-2 ring-primary':''}`}
-                >
-                  <span className="text-xl sm:text-2xl">🏳️</span>
-                  <span className="text-sm sm:text-base">Flag</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleSuitClick('king')}
-                  className={`flex items-center justify-center gap-2 w-full p-2 sm:p-3 rounded-lg hover:bg-secondary/50 transition-colors ${selectedSuit==='king'?'ring-2 ring-primary':''}`}
-                >
-                  <span className="text-xl sm:text-2xl">👑</span>
-                  <span className="text-sm sm:text-base">King</span>
-                </button>
               </div>
 
-              <p className="text-xs sm:text-sm text-muted-foreground mt-2 pt-2 border-t border-white/10">
+              <p className="text-xs sm:text-body text-muted-foreground mt-2 pt-2 border-t border-white/10">
                 Click a suit then a fixed amount below, or choose "Custom" to type your own value.
               </p>
 
@@ -269,7 +283,7 @@ const confirmBet = () => {
             ))}
           </div>
 
-          <p className="text-xs text-muted-foreground mt-4 pt-2 border-t border-white/10 text-center">
+          <p className="text-caption text-muted-foreground mt-4 pt-2 border-t border-white/10 text-center">
             Use <code>/gift [name] [user]</code> or <code>/shower [name]</code>
           </p>
 
@@ -300,3 +314,4 @@ const confirmBet = () => {
     </form>
   );
 }
+

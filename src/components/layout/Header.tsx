@@ -43,11 +43,11 @@ export function Header() {
         {userProfile && (
           <div className="flex items-center gap-3">
             <motion.div
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-success/10 border border-success/30"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/30"
               whileHover={{ scale: 1.05 }}
             >
-              <Coins className="w-4 h-4 text-success" />
-              <span className="text-sm font-semibold text-success">{formatWithCommas(userProfile.credits)} USD</span>
+              <Coins className="w-4 h-4 text-primary" />
+              <span className="text-body font-semibold text-primary">{formatWithCommas(userProfile.credits)} USD</span>
             </motion.div>
 
             <DropdownMenu>

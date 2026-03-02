@@ -354,7 +354,7 @@ export function AuthForm() {
                     checked={rememberMe}
                     onCheckedChange={(checked) => setRememberMe(checked as boolean)}
                   />
-                  <Label htmlFor="remember" className="text-sm text-muted-foreground cursor-pointer">
+                  <Label htmlFor="remember" className="text-body text-muted-foreground cursor-pointer">
                     Remember me
                   </Label>
                 </div>
@@ -374,7 +374,7 @@ export function AuthForm() {
                   onCheckedChange={(checked) => setAgreeToTerms(checked as boolean)}
                   className="mt-0.5"
                 />
-                <Label htmlFor="terms" className="text-sm text-muted-foreground cursor-pointer">
+                <Label htmlFor="terms" className="text-body text-muted-foreground cursor-pointer">
                   I agree to the{' '}
                   <a href="/terms" target="_blank" className="text-primary hover:underline">
                     Terms of Service
@@ -410,7 +410,7 @@ export function AuthForm() {
             <DialogTitle>Reset Password</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 pt-4">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-body text-muted-foreground">
               Enter your email address and we'll send you a link to reset your password.
             </p>
             <div className="relative">
@@ -434,7 +434,7 @@ export function AuthForm() {
           </div>
         </DialogContent>
       </Dialog>
-      <div className="absolute bottom-4 text-xs text-muted-foreground">
+      <div className="absolute bottom-4 text-caption text-muted-foreground">
         <GoogleDriveDownloadButton />
         &copy; {new Date().getFullYear()} Bimo. All rights reserved.
       </div>
@@ -442,3 +442,4 @@ export function AuthForm() {
     </div>
   );
 }
+

@@ -64,8 +64,9 @@ export default function VerifyEmailPage() {
           </div>
         </div>
 
-        <p className="text-sm text-muted-foreground">If you still can't find the email, check your spam/junk folder or contact support.</p>
+        <p className="text-body text-muted-foreground">If you still can't find the email, check your spam/junk folder or contact support.</p>
       </div>
     </div>
   );
 }
+

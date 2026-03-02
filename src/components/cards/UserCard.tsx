@@ -34,7 +34,7 @@ export function UserCard({
       initial={{ opacity: 0, x: -20 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ delay }}
-      className="flex items-center gap-3 p-3 rounded-xl bg-secondary/30 hover:bg-secondary/50 transition-colors"
+      className="surface-card flex items-center gap-3 p-3 hover:border-primary/30 transition-colors"
     >
       <CustomAvatar
         avatar={user.avatar}
@@ -46,11 +46,11 @@ export function UserCard({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <span className="font-medium truncate"><Username user={user} /></span>
-          <span className="text-xs px-1.5 py-0.5 rounded-full bg-primary/20 text-primary">
+          <span className="text-caption px-1.5 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
             {user.level}
           </span>
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 text-caption text-muted-foreground">
           {user.pets.length > 0 && (
             <span>{user.pets.length} 🐾</span>
           )}
@@ -63,7 +63,7 @@ export function UserCard({
       <div className="flex items-center gap-1.5">
         {isFriend && onMessage && (
           <div className="relative">
-            <Button variant="ghost" size="icon" onClick={onMessage} className="h-9 w-9">
+            <Button variant="ghost" size="icon" onClick={onMessage} className="tap-target h-9 w-9">
               <MessageCircle className="w-4 h-4" />
             </Button>
             {unreadCount > 0 && (
@@ -75,7 +75,7 @@ export function UserCard({
         )}
 
         {isFriend && user.pets.length > 0 && onFeedPet && (
-          <Button variant="ghost" size="icon" onClick={onFeedPet} className="h-9 w-9 text-destructive">
+          <Button variant="ghost" size="icon" onClick={onFeedPet} className="tap-target h-9 w-9 text-destructive">
             <Heart className="w-4 h-4" />
           </Button>
         )}
@@ -87,13 +87,13 @@ export function UserCard({
         )}
 
         {isPending && (
-          <span className="text-xs text-muted-foreground px-2 py-1 bg-secondary rounded">
+          <span className="text-caption text-muted-foreground px-2 py-1 bg-secondary rounded-md">
             Pending
           </span>
         )}
 
         {isFriend && onRemoveFriend && (
-          <Button variant="ghost" size="icon" onClick={onRemoveFriend} className="h-9 w-9 text-destructive">
+          <Button variant="ghost" size="icon" onClick={onRemoveFriend} className="tap-target h-9 w-9 text-destructive">
             <UserMinus className="w-4 h-4" />
           </Button>
         )}

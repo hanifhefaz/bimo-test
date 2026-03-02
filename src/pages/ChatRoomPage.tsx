@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
@@ -26,6 +26,9 @@ import {
   getUserByUsername,
   getUserById,
   getUsersByIds,
+  blockUser,
+  unblockUser,
+  chargeVoteKickFee,
   ChatMessage as ChatMessageType,
   Chatroom,
   addToRecentRooms,
@@ -34,15 +37,35 @@ import {
 } from '@/lib/firebaseOperations';
 
 import { gameBotManager } from '@/lib/games';
-import { getActiveContest, recordContestGift, GiftShowerContest } from '@/lib/giftContest';
-import { muteUser, isUserMuted, getMuteTimeRemaining, kickUser, canUserJoinRoom } from '@/lib/moderation';
+import {
+  recordContestGift,
+  GiftShowerContest,
+  startInviteContest,
+  INVITE_CONTEST_DURATION_DAYS,
+  INVITE_TOP_PRIZES,
+  INVITE_GRAND_PRIZE_CREDITS
+} from '@/lib/giftContest';
+import {
+  muteUser,
+  kickUser,
+  canUserJoinRoom,
+  setRoomSilence,
+  subscribeToRoomSilence,
+  startVoteKick,
+  castVoteKick,
+  cancelVoteKick,
+  subscribeToVoteKicks,
+  VoteKickRecord
+} from '@/lib/moderation';
 import { toast } from 'sonner';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { ref, get, onValue, off, push } from 'firebase/database';
+import { ref, get, onValue, off, push, runTransaction, set } from 'firebase/database';
 import { rtdb } from '@/lib/firebase';
 
 // Message word limit
 const MESSAGE_WORD_LIMIT = 100;
+const VOTE_KICK_REQUIRED_VOTES = 5;
+const VOTE_KICK_START_FEE = 0.05;
 
 function countWords(text: string): number {
   return text.trim().split(/\s+/).filter(word => word.length > 0).length;
@@ -58,7 +81,7 @@ export default function ChatRoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
   const { userProfile, refreshProfile } = useAuth();
-  const { openRoomTab, markTabAsRead, closeRoomTab, getRoomMessages } = useRoomTabs();
+  const { openTabs, openRoomTab, markTabAsRead, closeRoomTab, getRoomMessages } = useRoomTabs();
 
   const [room, setRoom] = useState<Chatroom | null>(null);
   const [participants, setParticipants] = useState<string[]>([]);
@@ -70,15 +93,128 @@ export default function ChatRoomPage() {
   const [activeContest, setActiveContest] = useState<GiftShowerContest | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [muteTimeLeft, setMuteTimeLeft] = useState(0);
+  const [isRoomSilenced, setIsRoomSilenced] = useState(false);
+  const [roomSilencedBy, setRoomSilencedBy] = useState<string | null>(null);
+  const [activeVoteKicks, setActiveVoteKicks] = useState<Record<string, VoteKickRecord>>({});
+  const [activeParticipantProfiles, setActiveParticipantProfiles] = useState<Record<string, { uid: string; username: string; usernameLower: string }>>({});
   const [activeRedeemCode, setActiveRedeemCode] = useState<string | null>(null);
   const [joinMessages, setJoinMessages] = useState<ChatMessageType[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   // timers are managed by the bot service in RTDB
 
+  const roomTab = openTabs.find(t => !t.isPrivateChat && t.id === (roomId || ''));
+  const hasRoomCache = !!roomId && getRoomMessages(roomId).length > 0;
+  const fallbackRoomName = roomTab?.name || 'Room';
+  const canSilenceControls = !!room && !!userProfile && (
+    room.ownerId === userProfile.uid || userProfile.isAdmin || userProfile.isChatAdmin
+  );
+  const blockedUsersSet = useMemo(() => new Set(userProfile?.blockedUsers || []), [userProfile?.blockedUsers]);
+  const participantsByUsernameLower = useMemo(() => {
+    const map = new Map<string, { uid: string; username: string }>();
+    Object.values(activeParticipantProfiles).forEach((p) => {
+      map.set((p.usernameLower || p.username.toLowerCase()), { uid: p.uid, username: p.username });
+    });
+    return map;
+  }, [activeParticipantProfiles]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    markTabAsRead(roomId);
+  }, [roomId, markTabAsRead]);
+
   useEffect(() => {
     if (!roomId || !userProfile) return;
 
-    // Check if user was kicked and cannot rejoin
+    let isCancelled = false;
+    let contestInterval: NodeJS.Timeout | null = null;
+    let codeInterval: NodeJS.Timeout | null = null;
+    let schedulerRenewInterval: NodeJS.Timeout | null = null;
+    let schedulerRetryInterval: NodeJS.Timeout | null = null;
+    let unsubscribeCodes: (() => void) | null = null;
+    let unsubscribeRoomSilence: (() => void) | null = null;
+    let unsubscribeVoteKicks: (() => void) | null = null;
+
+    const schedulerInstanceId = `${userProfile.uid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const schedulerRef = ref(rtdb, `roomSchedulers/${roomId}/redeem`);
+    const schedulerTtlMs = 3 * 60 * 1000;
+    let schedulerHeld = false;
+
+    const releaseScheduler = async () => {
+      if (!schedulerHeld) return;
+      try {
+        await runTransaction(schedulerRef, (current: any) => {
+          if (current?.holderId === schedulerInstanceId) return null;
+          return current;
+        });
+      } catch {
+        // ignore scheduler release failures
+      } finally {
+        schedulerHeld = false;
+      }
+    };
+
+    const tryClaimScheduler = async (): Promise<boolean> => {
+      try {
+        const now = Date.now();
+        const tr = await runTransaction(schedulerRef, (current: any) => {
+          if (!current || !current.expiresAt || current.expiresAt < now || current.holderId === schedulerInstanceId) {
+            return {
+              holderId: schedulerInstanceId,
+              holderUid: userProfile.uid,
+              expiresAt: now + schedulerTtlMs
+            };
+          }
+          return;
+        });
+
+        const val = tr.snapshot?.val();
+        schedulerHeld = !!val && val.holderId === schedulerInstanceId;
+        return schedulerHeld;
+      } catch {
+        return false;
+      }
+    };
+
+    const startCodeScheduler = async () => {
+      const claimed = await tryClaimScheduler();
+      if (!claimed || isCancelled) return;
+
+      const { checkAndGenerateCode } = await import('@/lib/redeemCodes');
+
+      schedulerRenewInterval = setInterval(async () => {
+        if (isCancelled || !schedulerHeld) return;
+        try {
+          await set(schedulerRef, {
+            holderId: schedulerInstanceId,
+            holderUid: userProfile.uid,
+            expiresAt: Date.now() + schedulerTtlMs
+          });
+        } catch {
+          schedulerHeld = false;
+        }
+      }, 60 * 1000);
+
+      codeInterval = setInterval(async () => {
+        if (isCancelled || !schedulerHeld) return;
+        const generatedCode = await checkAndGenerateCode(roomId);
+        if (generatedCode) {
+          sendMessage(roomId, {
+            roomId,
+            senderId: 'system',
+            senderName: 'System',
+            senderAvatar: 'CODE',
+            content: `NEW CODE: ${generatedCode.code} Worth: ${generatedCode.credits} USD\nExpires in 1 minute!\n\nType /redeem <CODE> to claim!`,
+            type: 'gift'
+          });
+        }
+      }, 60 * 2 * 1000);
+
+      schedulerRetryInterval = setInterval(async () => {
+        if (isCancelled || schedulerHeld) return;
+        await startCodeScheduler();
+      }, 90 * 1000);
+    };
+
     const checkKickStatus = async () => {
       const { canJoin, minutesRemaining } = await canUserJoinRoom(roomId, userProfile.uid);
       if (!canJoin) {
@@ -89,54 +225,19 @@ export default function ChatRoomPage() {
       return true;
     };
 
-    checkKickStatus().then(canJoin => {
-      if (!canJoin) return;
-
-      loadRoom();
-      checkBotStatus();
-      checkActiveContest();
-      checkMuteStatus();
-      addToRecentRooms(userProfile.uid, roomId);
-
-      // Check if favorite
-      setIsFavorite(userProfile.favoriteRooms?.includes(roomId) || false);
-
-      // Set up interval to check contest end (every 5 seconds) - only for Newbies room
-      let contestInterval: NodeJS.Timeout | null = null;
-      getChatroomById(roomId).then(roomData => {
-        if (roomData?.name === 'Newbies') {
-          contestInterval = setInterval(() => {
-            checkActiveContest();
-          }, 5000);
-        }
-      });
-
-      return () => {
-        if (contestInterval) clearInterval(contestInterval);
-      };
-    });
-
-    // Messages are subscribed and cached in RoomTabsContext so they remain
-    // available when switching tabs. We record join time in the tab provider
-    // when opening the tab (so older history is not shown to this client).
-
-    // Subscribe to game state in RTDB
     const gameRef = ref(rtdb, `games/${roomId}`);
     const unsubscribeGame = onValue(gameRef, (snapshot) => {
       setGameState(snapshot.val());
     });
 
-    // Subscribe to bots state so we can show active bot info in the header and notify the user privately
     const botsRef = ref(rtdb, `bots/${roomId}`);
     const unsubscribeBots = onValue(botsRef, (snapshot) => {
       const val = snapshot.val();
       setBotsState(val);
 
-      // If a bot is active and user is present, send private notification of bot presence (only once per user is enforced server-side)
       if (val && userProfile) {
         for (const type of Object.keys(val)) {
           if (val[type]?.active) {
-            // fire-and-forget notify
             gameBotManager.notifyUserBotPresent(roomId!, userProfile.uid).catch(() => {});
             break;
           }
@@ -144,108 +245,6 @@ export default function ChatRoomPage() {
       }
     });
 
-    // Load room to get participants for welcome message
-    getChatroomById(roomId).then(async roomData => {
-      if (roomData) {
-        const participantCount = roomData.participants.length;
-        const isNewbiesRoom = roomData.name === 'Newbies';
-
-        // Build welcome message with room owner info
-        let welcomeContent = `Welcome! This room is managed by ${roomData.ownerName}.\n\nThere are ${participantCount} members in this room.`;
-        if (isNewbiesRoom) {
-          welcomeContent += '\n\n💎 Use /redeem <CODE> to claim bonus USD when codes appear!';
-        }
-        if (userProfile.isAdmin) {
-          welcomeContent += '\n\n📋 Admin: Start gift contests with /startcontest <minutes> <prize>';
-        }
-        if (userProfile.isAdmin || userProfile.isChatAdmin) {
-          // remind moderators of available commands
-          welcomeContent += '\n\n🛠️ Moderator commands: /kick <user>, /mute <user>, /warn <user>';
-        }
-
-        // Send personal join messages visible only to this user
-        try {
-            const profiles = await getUsersByIds(roomData.participants || []);
-            const users = profiles.map(p => p.username || p.uid);
-          const ownerLine = `${roomData.name}: This room is managed by ${roomData.ownerName}!`;
-          const participantsLine = `${roomData.name}: Currently in the room: ${users.join(', ')}`;
-
-          const msg1: ChatMessageType = {
-            id: 'join_owner_' + Date.now(),
-            roomId,
-            senderId: 'system',
-            senderName: 'System',
-            senderAvatar: '📢',
-            content: ownerLine,
-            type: 'system',
-            timestamp: Date.now()
-          };
-
-          const msg2: ChatMessageType = {
-            id: 'join_participants_' + (Date.now() + 1),
-            roomId,
-            senderId: 'system',
-            senderName: 'System',
-            senderAvatar: '📢',
-            content: participantsLine,
-            type: 'system',
-            timestamp: Date.now() + 1
-          };
-
-          setJoinMessages([msg1, msg2]);
-        } catch (e) {
-          setJoinMessages([{
-            id: 'join_' + Date.now(),
-            roomId,
-            senderId: 'system',
-            senderName: 'System',
-            senderAvatar: '📢',
-            content: welcomeContent,
-            type: 'system',
-            timestamp: Date.now()
-          }]);
-        }
-
-        // For Newbies room, set up code generation with fixed 5-minute interval
-        if (isNewbiesRoom) {
-          const { subscribeToRedeemCodes, checkAndGenerateCode } = await import('@/lib/redeemCodes');
-
-          // Subscribe to code updates
-          const unsubscribeCodes = subscribeToRedeemCodes(roomId, (code) => {
-            // display active code until it expires; redeemable by any number of users
-            if (code && Date.now() < code.expiresAt) {
-              setActiveRedeemCode(code.code);
-            } else {
-              setActiveRedeemCode(null);
-            }
-          });
-
-          // Set up periodic code generation check (every 30 seconds to ensure we catch the 5-minute window)
-          // The actual generation is controlled by server-side timing, this just triggers the check
-          const codeInterval = setInterval(async () => {
-            const generatedCode = await checkAndGenerateCode(roomId);
-            if (generatedCode) {
-              sendMessage(roomId, {
-                roomId,
-                senderId: 'system',
-                senderName: 'System',
-                senderAvatar: '🎟️',
-                content: `🎟️ NEW CODE: ${generatedCode.code} Worth: ${generatedCode.credits} USD\n⏰ Expires in 1 minute!\n\nType /redeem <CODE> to claim!`,
-                type: 'system'
-              });
-            }
-          }, 60 * 2 * 1000); // Check every 2 minutes
-
-          // Cleanup on unmount
-          return () => {
-            unsubscribeCodes();
-            clearInterval(codeInterval);
-          };
-        }
-      }
-    });
-
-    // Subscribe to mute status changes
     const muteRef = ref(rtdb, `moderation/mutes/${roomId}/${userProfile.uid}`);
     const unsubscribeMute = onValue(muteRef, async (snapshot) => {
       if (snapshot.exists()) {
@@ -264,25 +263,143 @@ export default function ChatRoomPage() {
       }
     });
 
-    // Subscribe to kick status - auto-leave if kicked
     const kickRef = ref(rtdb, `moderation/kicks/${roomId}/${userProfile.uid}`);
     const unsubscribeKick = onValue(kickRef, async (snapshot) => {
       if (snapshot.exists()) {
         const kickData = snapshot.val();
         const now = Date.now();
         if (now < kickData.canRejoinAt) {
-          // User was kicked - force leave
           toast.error('You have been kicked from this room!');
           navigate('/chatrooms');
         }
       }
     });
 
+    unsubscribeRoomSilence = subscribeToRoomSilence(roomId, (state) => {
+      if (!state?.active) {
+        setIsRoomSilenced(false);
+        setRoomSilencedBy(null);
+        return;
+      }
+      setIsRoomSilenced(true);
+      setRoomSilencedBy(state.silencedByName || 'moderator');
+    });
+
+    unsubscribeVoteKicks = subscribeToVoteKicks(roomId, (records) => {
+      setActiveVoteKicks(records || {});
+    });
+
+    (async () => {
+      const canJoin = await checkKickStatus();
+      if (!canJoin || isCancelled) return;
+
+      loadRoom();
+      checkBotStatus();
+      addToRecentRooms(userProfile.uid, roomId);
+      setIsFavorite(userProfile.favoriteRooms?.includes(roomId) || false);
+
+      const roomData = await getChatroomById(roomId);
+      if (!roomData || isCancelled) return;
+
+      const participantCount = roomData.participants.length;
+      const isNewbiesRoom = roomData.name === 'Newbies';
+
+      let welcomeContent = `Welcome! This room is managed by ${roomData.ownerName}.\n\nThere are ${participantCount} members in this room.`;
+      if (isNewbiesRoom) {
+        welcomeContent += '\n\nUse /redeem <CODE> to claim bonus USD when codes appear!';
+      }
+      if (userProfile.isAdmin) {
+        welcomeContent += '\n\nAdmin: Start gift contests with /startcontest <minutes> <prize> <giftId>';
+        welcomeContent += '\n\nAdmin: Start invite contest with /startinvitecontest';
+      }
+      if (userProfile.isAdmin || userProfile.isChatAdmin) {
+        welcomeContent += '\n\nModerator commands: /kick <user>, /mute <user>, /warn <user>, /silence, /unsilence';
+      }
+
+      try {
+        const profiles = await getUsersByIds(roomData.participants || []);
+        const users = profiles.map((p) => p.username || p.uid);
+        const ownerLine = `${roomData.name}: This room is managed by ${roomData.ownerName}!`;
+        const participantsLine = `${roomData.name}: Currently in the room: ${users.join(', ')}`;
+
+        const msg1: ChatMessageType = {
+          id: 'join_owner_' + Date.now(),
+          roomId,
+          senderId: 'system',
+          senderName: 'System',
+          senderAvatar: 'System',
+          content: ownerLine,
+          type: 'system',
+          timestamp: Date.now()
+        };
+
+        const msg2: ChatMessageType = {
+          id: 'join_participants_' + (Date.now() + 1),
+          roomId,
+          senderId: 'system',
+          senderName: 'System',
+          senderAvatar: 'System',
+          content: participantsLine,
+          type: 'system',
+          timestamp: Date.now() + 1
+        };
+
+        if (!isCancelled) setJoinMessages([msg1, msg2]);
+      } catch {
+        if (!isCancelled) {
+          setJoinMessages([{
+            id: 'join_' + Date.now(),
+            roomId,
+            senderId: 'system',
+            senderName: 'System',
+            senderAvatar: 'System',
+            content: welcomeContent,
+            type: 'system',
+            timestamp: Date.now()
+          }]);
+        }
+      }
+
+      if (isNewbiesRoom) {
+        const { subscribeToRedeemCodes } = await import('@/lib/redeemCodes');
+        if (isCancelled) return;
+
+        unsubscribeCodes = subscribeToRedeemCodes(roomId, (code) => {
+          if (code && Date.now() < code.expiresAt) {
+            setActiveRedeemCode(code.code);
+          } else {
+            setActiveRedeemCode(null);
+          }
+        });
+
+        await checkActiveContest();
+        contestInterval = setInterval(() => {
+          checkActiveContest();
+        }, 60 * 1000);
+
+        await startCodeScheduler();
+      } else {
+        setActiveRedeemCode(null);
+        setActiveContest(null);
+      }
+    })().catch((e) => {
+      console.error('Failed to initialize room realtime bindings:', e);
+    });
+
     return () => {
+      isCancelled = true;
       off(gameRef, 'value', unsubscribeGame);
       off(botsRef, 'value', unsubscribeBots);
       off(muteRef, 'value', unsubscribeMute);
       off(kickRef, 'value', unsubscribeKick);
+      if (contestInterval) clearInterval(contestInterval);
+      if (codeInterval) clearInterval(codeInterval);
+      if (schedulerRenewInterval) clearInterval(schedulerRenewInterval);
+      if (schedulerRetryInterval) clearInterval(schedulerRetryInterval);
+      if (unsubscribeCodes) unsubscribeCodes();
+      if (unsubscribeRoomSilence) unsubscribeRoomSilence();
+      if (unsubscribeVoteKicks) unsubscribeVoteKicks();
+      void releaseScheduler();
     };
   }, [roomId, userProfile?.uid, navigate]);
 
@@ -296,6 +413,38 @@ export default function ChatRoomPage() {
       if (unsubscribe) unsubscribe();
     };
   }, [roomId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadParticipantProfiles = async () => {
+      if (!participants.length) {
+        setActiveParticipantProfiles({});
+        return;
+      }
+
+      try {
+        const profiles = await getUsersByIds(participants);
+        if (cancelled) return;
+
+        const next: Record<string, { uid: string; username: string; usernameLower: string }> = {};
+        profiles.forEach((p) => {
+          next[p.uid] = {
+            uid: p.uid,
+            username: p.username,
+            usernameLower: (p.usernameLower || p.username || '').toLowerCase()
+          };
+        });
+        setActiveParticipantProfiles(next);
+      } catch (error) {
+        console.error('Failed to load active participant profiles:', error);
+      }
+    };
+
+    loadParticipantProfiles();
+    return () => {
+      cancelled = true;
+    };
+  }, [participants]);
 
   // whenever participants change, merge into room state so any code still
   // referencing `room.participants` sees the fresh list as well
@@ -311,10 +460,60 @@ export default function ChatRoomPage() {
     scrollToBottom();
   }, [roomId, getRoomMessages(roomId || ''), JSON.stringify(joinMessages)]);
 
+  useEffect(() => {
+    if (!roomId) return;
+    const id = window.requestAnimationFrame(() => scrollToBottom());
+    return () => window.cancelAnimationFrame(id);
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!roomId || !userProfile) return;
+    const records = Object.entries(activeVoteKicks || {});
+    if (!records.length) return;
+
+    records.forEach(([targetUserId, record]) => {
+      const isExpired = Date.now() > (record.expiresAt || 0);
+      if (isExpired) {
+        cancelVoteKick(roomId, targetUserId).catch(() => {});
+        if (record?.startedBy === userProfile.uid) {
+          sendMessage(roomId, {
+            roomId,
+            senderId: 'system',
+            senderName: 'System',
+            senderAvatar: '⏱️',
+            content: `Vote-kick for ${record.targetUsername || 'user'} was cancelled (1 minute timeout).`,
+            type: 'system'
+          });
+        }
+        return;
+      }
+
+      const stillInRoom = participants.includes(targetUserId);
+      if (stillInRoom) return;
+
+      cancelVoteKick(roomId, targetUserId).catch(() => {});
+      if (record?.startedBy === userProfile.uid) {
+        sendMessage(roomId, {
+          roomId,
+          senderId: 'system',
+          senderName: 'System',
+          senderAvatar: '🗳️',
+          content: `Vote-kick for ${record.targetUsername || 'user'} was cancelled because they left the room.`,
+          type: 'system'
+        });
+      }
+    });
+  }, [activeVoteKicks, participants, roomId, userProfile]);
+
   // Countdown timer for mute
 
   const cached = getRoomMessages(roomId || '');
-  const messagesToRender = (joinMessages && joinMessages.length > 0) ? [...joinMessages, ...cached] : cached;
+  const visibleCached = cached.filter((msg) => {
+    if (!msg?.senderId || msg.senderId === 'system' || msg.senderId === userProfile?.uid) return true;
+    return !blockedUsersSet.has(msg.senderId);
+  });
+  const baseMessages = (joinMessages && joinMessages.length > 0) ? [...joinMessages, ...visibleCached] : visibleCached;
+  const messagesToRender = isRoomSilenced ? [] : baseMessages;
   useEffect(() => {
     if (!isMuted || muteTimeLeft <= 0) return;
 
@@ -373,40 +572,44 @@ export default function ChatRoomPage() {
   const checkActiveContest = async () => {
     if (!roomId) return;
     try {
-      const { getActiveContest, endContest } = await import('@/lib/giftContest');
+      const { getActiveContest } = await import('@/lib/giftContest');
       const contest = await getActiveContest(roomId);
 
       // Contest ended handling and announcement are performed server-side by endContest/getActiveContest. No client-side action required here.
 
-      setActiveContest(contest);
+      setActiveContest(contest && contest.type === 'gift' ? contest : null);
     } catch (error) {
       console.error('Failed to check contest:', error);
     }
   };
 
-  const checkMuteStatus = async () => {
-    if (!roomId || !userProfile) return;
-    try {
-      const muted = await isUserMuted(roomId, userProfile.uid);
-      setIsMuted(muted);
-      if (muted) {
-        const remaining = await getMuteTimeRemaining(roomId, userProfile.uid);
-        setMuteTimeLeft(remaining);
-      }
-    } catch (error) {
-      console.error('Failed to check mute status:', error);
-    }
-  };
-
   const loadRoom = async () => {
     if (!roomId) return;
-    setLoading(true);
+    const canHydrateFromTab = !!roomTab;
+    if (canHydrateFromTab) {
+      // Hydrate immediately from the tab so switching back to an open room
+      // shows messages instantly while fresh room data loads in background.
+      setRoom(prev => prev || {
+        id: roomId,
+        name: fallbackRoomName,
+        ownerId: '',
+        ownerName: '',
+        moderators: [],
+        isPrivate: false,
+        topic: '',
+        participants: [],
+        createdAt: Date.now(),
+      });
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
     try {
       const roomData = await getChatroomById(roomId);
       if (roomData) {
         setRoom(roomData);
         setParticipants(roomData.participants || []);
-        // Register room as a tab (do not auto-mark as read on open; unread should persist until leaving)
+        // Register room as a tab; entering room view clears unread state.
         openRoomTab(roomId, roomData.name);
       } else {
         toast.error('Room not found');
@@ -431,6 +634,27 @@ export default function ChatRoomPage() {
     }
   };
 
+  const extractMentionsFromMessage = (messageText: string): { mentionUserIds: string[]; mentionUsernames: string[] } => {
+    const mentionRegex = /@([a-zA-Z0-9._-]{3,32})/g;
+    const foundIds = new Set<string>();
+    const foundNames = new Set<string>();
+    let match: RegExpExecArray | null = null;
+
+    while ((match = mentionRegex.exec(messageText)) !== null) {
+      const usernameKey = match[1]?.toLowerCase();
+      if (!usernameKey) continue;
+      const participant = participantsByUsernameLower.get(usernameKey);
+      if (!participant) continue;
+      foundIds.add(participant.uid);
+      foundNames.add(participant.username);
+    }
+
+    return {
+      mentionUserIds: Array.from(foundIds),
+      mentionUsernames: Array.from(foundNames)
+    };
+  };
+
   const handleSendMessage = async (content: string) => {
     if (!userProfile || !roomId) return;
 
@@ -448,6 +672,11 @@ export default function ChatRoomPage() {
       return;
     }
 
+    if (isRoomSilenced) {
+      toast.error('Room is currently silenced. Messages are disabled.');
+      return;
+    }
+
     // Game commands (starting with '!') are sent to bot-specific RTDB path and not broadcast to chat
     if (content.startsWith('!')) {
       try {
@@ -459,7 +688,7 @@ export default function ChatRoomPage() {
             senderId: 'system',
             senderName: 'System',
             senderAvatar: '🤖',
-            content: `No game bot is active in this room. Add a bot with: /add bot luckynumber (or /add bot lowcard /add bot dice).`,
+            content: `No game bot is active in this room. Add a bot with: /add bot higherlower (or /add bot luckynumber /add bot lowcard /add bot dice).`,
             type: 'system'
           });
           return;
@@ -487,6 +716,7 @@ export default function ChatRoomPage() {
     }
 
     // Regular message
+    const { mentionUserIds, mentionUsernames } = extractMentionsFromMessage(content);
     sendMessage(roomId, {
       roomId,
       senderId: userProfile.uid,
@@ -499,6 +729,8 @@ export default function ChatRoomPage() {
       senderIsAdmin: userProfile.isAdmin,
       senderIsChatAdmin: userProfile.isChatAdmin,
       senderIsStaff: userProfile.isStaff,
+      mentionUserIds,
+      mentionUsernames,
       content,
       type: 'message'
     });
@@ -512,6 +744,53 @@ export default function ChatRoomPage() {
 
     const parts = content.slice(1).split(' ');
     const command = parts[0].toLowerCase();
+    const isOwner = room.ownerId === userProfile.uid;
+    const isMod = room.moderators?.includes(userProfile.uid);
+    const canModerate = isOwner || isMod || userProfile.isAdmin || userProfile.isChatAdmin;
+    const canSilenceRoom = isOwner || userProfile.isAdmin || userProfile.isChatAdmin;
+
+    if (command === 'silence') {
+      if (!canSilenceRoom) {
+        toast.error('Only room owner, chat admin, or global admin can silence the room');
+        return;
+      }
+      if (isRoomSilenced) {
+        toast.info('Room is already silenced');
+        return;
+      }
+      await setRoomSilence(roomId, true, userProfile.uid, userProfile.username);
+      sendMessage(roomId, {
+        roomId,
+        senderId: 'system',
+        senderName: 'System',
+        senderAvatar: '🔕',
+        content: `Room has been silenced by ${userProfile.username}. No messages are allowed.`,
+        type: 'system'
+      });
+      return;
+    }
+
+    if (command === 'unsilence') {
+      if (!canSilenceRoom) {
+        toast.error('Only room owner, chat admin, or global admin can unsilence the room');
+        return;
+      }
+      await setRoomSilence(roomId, false, userProfile.uid, userProfile.username);
+      sendMessage(roomId, {
+        roomId,
+        senderId: 'system',
+        senderName: 'System',
+        senderAvatar: '🔔',
+        content: `Room silence has been lifted by ${userProfile.username}.`,
+        type: 'system'
+      });
+      return;
+    }
+
+    if (isRoomSilenced) {
+      toast.error('Room is silenced. Only /unsilence is allowed.');
+      return;
+    }
 
     // Check for free commands first
     const freeCommand = FREE_COMMANDS.find(c => c.command === command);
@@ -527,10 +806,146 @@ export default function ChatRoomPage() {
       return;
     }
 
-    // Moderator commands: /kick, /mute, /warn
-    const isOwner = room.ownerId === userProfile.uid;
-    const isMod = room.moderators?.includes(userProfile.uid);
-    const canModerate = isOwner || isMod || userProfile.isAdmin || userProfile.isChatAdmin;
+    if ((command === 'block' || command === 'unblock') && parts[1]) {
+      const targetUsername = parts[1];
+      const targetUser = await getUserByUsername(targetUsername);
+      if (!targetUser) {
+        toast.error('User not found');
+        return;
+      }
+      if (targetUser.uid === userProfile.uid) {
+        toast.error('You cannot block/unblock yourself');
+        return;
+      }
+
+      const result = command === 'block'
+        ? await blockUser(userProfile.uid, targetUser.uid)
+        : await unblockUser(userProfile.uid, targetUser.uid);
+
+      if (!result.success) {
+        toast.error(result.message);
+        return;
+      }
+
+      toast.success(result.message);
+      await refreshProfile();
+      return;
+    }
+
+    if (command === 'startkick' && parts[1]) {
+      const targetUsername = parts[1];
+      const targetUser = await getUserByUsername(targetUsername);
+      if (!targetUser) {
+        toast.error('User not found');
+        return;
+      }
+      if (targetUser.uid === userProfile.uid) {
+        toast.error('You cannot start a vote-kick for yourself');
+        return;
+      }
+      if (targetUser.uid === room.ownerId || targetUser.isAdmin || targetUser.isChatAdmin) {
+        toast.error('You cannot start vote-kick for this user');
+        return;
+      }
+      if (!participants.includes(targetUser.uid)) {
+        toast.error(`${targetUsername} is not in the room`);
+        return;
+      }
+      if (activeVoteKicks[targetUser.uid]) {
+        toast.error('Vote-kick already active for this user');
+        return;
+      }
+
+      const chargeResult = await chargeVoteKickFee(userProfile.uid, VOTE_KICK_START_FEE);
+      if (!chargeResult.success) {
+        toast.error(chargeResult.message);
+        return;
+      }
+
+      const startResult = await startVoteKick(
+        roomId,
+        targetUser.uid,
+        targetUser.username || targetUsername,
+        userProfile.uid,
+        userProfile.username,
+        VOTE_KICK_REQUIRED_VOTES
+      );
+
+      if (!startResult.success) {
+        // If vote start fails, refund the fee.
+        await updateCredits(userProfile.uid, VOTE_KICK_START_FEE);
+        await refreshProfile();
+        toast.error(startResult.message);
+        return;
+      }
+
+      await refreshProfile();
+      sendMessage(roomId, {
+        roomId,
+        senderId: 'system',
+        senderName: 'System',
+        senderAvatar: '🗳️',
+        content: `${userProfile.username} started vote-kick for ${targetUser.username || targetUsername}. (${startResult.votes}/${VOTE_KICK_REQUIRED_VOTES} votes, 1 minute limit)`,
+        type: 'system'
+      });
+      return;
+    }
+
+    if (command === 'votekick' && parts[1]) {
+      const targetUsername = parts[1];
+      const targetUser = await getUserByUsername(targetUsername);
+      if (!targetUser) {
+        toast.error('User not found');
+        return;
+      }
+      if (!participants.includes(targetUser.uid)) {
+        toast.error(`${targetUsername} is not in the room`);
+        return;
+      }
+      if (targetUser.uid === userProfile.uid) {
+        toast.error('You cannot vote to kick yourself');
+        return;
+      }
+      const existing = activeVoteKicks[targetUser.uid];
+      if (!existing) {
+        toast.error('No active vote-kick for this user');
+        return;
+      }
+      if (existing?.votes?.[userProfile.uid]) {
+        toast.error('You already voted');
+        return;
+      }
+
+      const voteResult = await castVoteKick(roomId, targetUser.uid, userProfile.uid);
+      if (!voteResult.success) {
+        toast.error(voteResult.message);
+        return;
+      }
+
+      sendMessage(roomId, {
+        roomId,
+        senderId: 'system',
+        senderName: 'System',
+        senderAvatar: '🗳️',
+        content: `${userProfile.username} voted to kick ${targetUser.username || targetUsername}. (${voteResult.votes}/${voteResult.requiredVotes})`,
+        type: 'system'
+      });
+
+      if (voteResult.reached) {
+        await kickUser(roomId, targetUser.uid, 'community-vote');
+        await leaveChatroom(roomId, targetUser.uid);
+        await cancelVoteKick(roomId, targetUser.uid);
+        sendMessage(roomId, {
+          roomId,
+          senderId: 'system',
+          senderName: 'System',
+          senderAvatar: '🚫',
+          content: `${targetUser.username || targetUsername} has been kicked by community vote.`,
+          type: 'system'
+        });
+      }
+      return;
+    }
 
     // Admin commands: /ban, /unban
     if (command === 'ban' && userProfile.isAdmin && parts[1]) {
@@ -704,12 +1119,37 @@ export default function ChatRoomPage() {
             senderName: 'System',
             senderAvatar: '🎁',
             content: `🎉 GIFT SHOWER CONTEST STARTED! 🎉\nDuration: ${minutes} minutes\nPrize: ${prize} credits\nEligible gift: ${gift.emoji} ${gift.name}\nPrizes will be split among top senders based on number of gifts sent.\n\n⚠️ This is the only contest for today!`,
-            type: 'system'
+            type: 'gift'
           });
           toast.success('Contest started!');
         }
       } catch (error) {
         toast.error('Failed to start contest');
+      }
+      return;
+    }
+
+    // Admin command: Start invite contest (duration/prizes from constants)
+    if (command === 'startinvitecontest' && userProfile.isAdmin) {
+      try {
+        const result = await startInviteContest();
+        if (result.error) {
+          toast.error(result.error);
+          return;
+        }
+        if (result.contest) {
+          toast.success(`Invite contest started for ${INVITE_CONTEST_DURATION_DAYS} day(s).`);
+          sendMessage(roomId, {
+            roomId,
+            senderId: 'system',
+            senderName: 'System',
+            senderAvatar: '🎫',
+            content: `INVITE CONTEST STARTED!\nDuration: ${INVITE_CONTEST_DURATION_DAYS} day(s)\nTop 5 prizes: ${INVITE_TOP_PRIZES.join(' / ')} credits\nGrand prize: ${INVITE_GRAND_PRIZE_CREDITS} credits + top pet (random lottery code draw)\n\nInvite friends from Home -> Invite section. Contest details are available in /contests.`,
+            type: 'gift'
+          });
+        }
+      } catch (error) {
+        toast.error('Failed to start invite contest');
       }
       return;
     }
@@ -745,7 +1185,7 @@ export default function ChatRoomPage() {
       return;
     }
 
-    if (command === 'lowcard' || command === 'dice' || command === 'luckynumber') {
+    if (command === 'lowcard' || command === 'dice' || command === 'luckynumber' || command === 'higherlower') {
       if (!botActive) {
         toast.info(`Add the bot first with: /add bot ${command}`);
         return;
@@ -756,8 +1196,10 @@ export default function ChatRoomPage() {
         content = `🃏 Lowcard game! Use !start <amount> to start a game with a wager. Other players can join with !j within 30 seconds. Lowest card is eliminated each round until one player remains!`;
       } else if (command === 'dice') {
         content = `🎲 Dice game! Use !start <amount> to start a game with a wager. Other players can join with !j within 30 seconds. Highest roll wins each round until one player remains!`;
-      } else {
+      } else if (command === 'luckynumber') {
         content = `🔢 Lucky Number! Use !start to begin a new game. Players join with !j <amount> during the join window. During each round submit !guess <number 1-100>. Use !cashout during decision phase to claim payouts. Exact guesses win special multipliers.`;
+      } else {
+        content = `📈 Higher/Lower! Use !start <amount> to begin and !j to join. Each round the bot shows a card. Choose !h (higher) or !l (lower). Wrong guesses are eliminated until one player remains.`;
       }
 
       sendMessage(roomId, {
@@ -847,22 +1289,7 @@ export default function ChatRoomPage() {
         type: 'gift'
       });
 
-      // Private notification to the recipient
-      try {
-        const messagesRef = ref(rtdb, `messages/${roomId}`);
-        await push(messagesRef, {
-          roomId,
-          senderId: 'bot',
-          senderName: '🎁 GiftBot',
-          senderAvatar: '🎁',
-          content: `🎁 You received a ${gift.emoji} ${gift.name} from ${userProfile.username}! (+${gift.price} gift value, 20% convertible)`,
-          type: 'gift',
-          timestamp: Date.now(),
-          targetUserId: targetUser.uid
-        });
-      } catch (e) { /* non-fatal */ }
 
-      toast.success(`Sent ${gift.name} to ${targetUsername}`);
       return;
     }
 
@@ -973,7 +1400,7 @@ export default function ChatRoomPage() {
             senderName: 'System',
             senderAvatar: '🎉',
             content: `🎉 ${userProfile.username} redeemed code ${code} and won ${result.credits} credits! 💰`,
-            type: 'system'
+            type: 'gift'
           });
           toast.success(`You won ${result.credits} credits!`);
           refreshProfile();
@@ -1000,7 +1427,7 @@ export default function ChatRoomPage() {
     }
   };
 
-  if (loading || !room || !userProfile) {
+  if (((loading && !hasRoomCache) || !room) || !userProfile) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -1017,10 +1444,10 @@ export default function ChatRoomPage() {
         <header className="sticky top-0 z-30 h-12 glass-strong border-b border-border flex items-center justify-between px-4 shrink-0 bg-background/95 backdrop-blur">
           <div className="flex items-center gap-3 min-w-0">
             <div className="min-w-0">
-              <h1 className="font-semibold text-sm truncate">{room.name}</h1>
+              <h1 className="heading-tight font-semibold text-body truncate">{room.name}</h1>
 
             </div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2 text-caption text-muted-foreground">
                 {/* Bot status indicator */}
                 {botsState && Object.keys(botsState).some(k => botsState[k]?.active) && (
                   (() => {
@@ -1028,9 +1455,15 @@ export default function ChatRoomPage() {
                     const type = types[0];
                     const last = botsState[type]?.lastActiveAt || botsState[type]?.startedAt || 0;
                     const minutes = Math.max(0, Math.floor((Date.now() - last) / 60000));
-                    const handlerName = (type === 'bimo') ? 'Bimo' : type.charAt(0).toUpperCase() + type.slice(1);
+                    const handlerName = type === 'bimo'
+                      ? 'Bimo'
+                      : type === 'luckynumber'
+                        ? 'Lucky Number'
+                        : type === 'higherlower'
+                          ? 'Higher/Lower'
+                          : type.charAt(0).toUpperCase() + type.slice(1);
                     return (
-                      <span className="ml-2 inline-flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="ml-2 inline-flex items-center gap-2 text-caption text-muted-foreground">
                         <span className="px-2 py-0.5 rounded bg-primary/10 text-primary text-xs">🃏 {handlerName}</span>
                       </span>
                     );
@@ -1066,7 +1499,7 @@ export default function ChatRoomPage() {
         </header>
 
         {/* Gift Contest Banner */}
-        {activeContest && (
+        {activeContest && activeContest.type === 'gift' && (
           <GiftContestBanner contest={activeContest} />
         )}
 
@@ -1079,8 +1512,17 @@ export default function ChatRoomPage() {
                 animate={{ opacity: 1 }}
                 className="text-center py-12 text-muted-foreground"
               >
-                <p>No messages yet</p>
-                <p className="text-sm">Be the first to say something!</p>
+                {isRoomSilenced ? (
+                  <>
+                    <p>Room is silenced</p>
+                    <p className="text-sm">Messages are hidden until a moderator lifts silence.</p>
+                  </>
+                ) : (
+                  <>
+                    <p>No messages yet</p>
+                    <p className="text-sm">Be the first to say something!</p>
+                  </>
+                )}
               </motion.div>
             ) : (
               messagesToRender.map((msg) => (
@@ -1088,6 +1530,7 @@ export default function ChatRoomPage() {
                   key={msg.id}
                   message={msg}
                   isOwn={msg.senderId === userProfile.uid}
+                  isMentionedToMe={Array.isArray(msg.mentionUserIds) && msg.mentionUserIds.includes(userProfile.uid)}
                 />
               ))
             )}
@@ -1109,11 +1552,27 @@ export default function ChatRoomPage() {
           </motion.div>
         )}
 
+        {isRoomSilenced && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="px-4 py-2 bg-amber-500/20 border-t border-amber-500/30"
+          >
+            <div className="max-w-lg md:max-w-3xl lg:max-w-4xl mx-auto flex items-center justify-center gap-2 text-sm text-amber-300">
+              <span>🔕</span>
+              <span>
+                Room is silenced{roomSilencedBy ? ` by ${roomSilencedBy}` : ''}. Messages are temporarily disabled.
+                {canSilenceControls ? ' Use /unsilence to reopen chat.' : ''}
+              </span>
+            </div>
+          </motion.div>
+        )}
+
         {/* Input */}
         <div className="w-full shrink-0 px-2 sm:px-0">
           <ChatInput
             onSend={handleSendMessage}
-            disabled={isMuted}
+            disabled={isMuted || (isRoomSilenced && !canSilenceControls)}
             bimoActive={!!(gameState?.bimo && gameState.bimo.status === 'waiting')}
             ownedEmoticonPacks={(userProfile as any).ownedEmoticonPacks || []}
           />
@@ -1122,3 +1581,6 @@ export default function ChatRoomPage() {
     </NewAppLayout>
   );
 }
+
+
+

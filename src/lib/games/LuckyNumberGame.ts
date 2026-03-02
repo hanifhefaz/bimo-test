@@ -2,7 +2,7 @@
 import { ref, get, set, update, remove, push } from 'firebase/database';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { rtdb, db } from '../firebase';
-import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly } from '../firebaseOperations';
+import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly, incrementMiniGameWins, triggerCompanionEvent } from '../firebaseOperations';
 import { formatWithCommas } from '../utils';
 import { GameHandler, BotMessage, GameSession } from './types';
 
@@ -35,20 +35,20 @@ type NSGame = {
 
 // Round config (matches locked rules)
 const ROUND_CONFIG: { limit: number; multiplier: number }[] = [
-  { limit: 30, multiplier: 1 },
-  { limit: 20, multiplier: 2 },
-  { limit: 10, multiplier: 5 },
-  { limit: 5, multiplier: 10 },
-  { limit: 2, multiplier: 20 },
-  { limit: 1, multiplier: 30 }
+  { limit: 30, multiplier: 0.9 },
+  { limit: 20, multiplier: 1.8 },
+  { limit: 10, multiplier: 3.5 },
+  { limit: 5, multiplier: 6 },
+  { limit: 2, multiplier: 10 },
+  { limit: 1, multiplier: 15 }
 ];
 
 // Exact-guess special multipliers: these bonus multipliers are ADDED to the round multiplier
 // Round 1: +20x, Round 2: +10x, Round 3: +5x (on top of round multiplier)
 const EXACT_BONUS_MULTIPLIERS: Record<number, number> = {
-  1: 20,
-  2: 10,
-  3: 5
+  1: 8,
+  2: 4,
+  3: 2
 };
 
 function computeExactPayout(bet: number, round: number): number {
@@ -286,6 +286,16 @@ export class LuckyNumberGame implements GameHandler {
           const payout = computeExactPayout(g.betAmount, currentGame.currentRound || 1);
           try { await updateCredits(g.userId, payout); } catch (e) { console.warn('Failed to credit exact winner', e); }
           try { await addDoc(collection(db, 'transactions'), { from: 'game', to: g.userId, amount: payout, participants: [g.userId], type: 'payout', description: 'Lucky Number exact win', timestamp: serverTimestamp() }); } catch (e) { }
+          try { await incrementMiniGameWins(g.userId); } catch (e) { console.warn('Failed to track mini-game win (lucky number exact):', e); }
+          try { await triggerCompanionEvent(g.userId, 'mini_game_win', { roomId }); } catch (e) { console.warn('Failed to trigger companion mini_game_win (lucky number):', e); }
+          try { await triggerCompanionEvent(g.userId, 'high_amount_game_win', { roomId, amount: payout }); } catch (e) { console.warn('Failed to trigger companion high_amount_game_win (lucky number):', e); }
+        }
+        try {
+          const winnerIds = new Set(exactGuessers.map((p) => p.userId));
+          const losers = allPlayersSnap.players.filter((p) => p.isActive && !p.hasCashedOut && !winnerIds.has(p.userId));
+          await Promise.all(losers.map((p) => triggerCompanionEvent(p.userId, 'mini_game_loss', { roomId })));
+        } catch (e) {
+          console.warn('Failed to trigger companion mini_game_loss events (lucky number):', e);
         }
 
         // Announce winners with payout amounts
@@ -457,6 +467,16 @@ export class LuckyNumberGame implements GameHandler {
         const payout = computeExactPayout(g.betAmount, game.currentRound || 1);
         try { await updateCredits(g.userId, payout); } catch (e) { console.warn('Failed to credit exact winner', e); }
         try { await addDoc(collection(db, 'transactions'), { from: 'game', to: g.userId, amount: payout, participants: [g.userId], type: 'payout', description: 'Lucky Number exact win', timestamp: serverTimestamp() }); } catch (e) { }
+        try { await incrementMiniGameWins(g.userId); } catch (e) { console.warn('Failed to track mini-game win (lucky number exact):', e); }
+        try { await triggerCompanionEvent(g.userId, 'mini_game_win', { roomId }); } catch (e) { console.warn('Failed to trigger companion mini_game_win (lucky number):', e); }
+        try { await triggerCompanionEvent(g.userId, 'high_amount_game_win', { roomId, amount: payout }); } catch (e) { console.warn('Failed to trigger companion high_amount_game_win (lucky number):', e); }
+      }
+      try {
+        const winnerIds = new Set(exactGuessers.map((p) => p.userId));
+        const losers = activePlayers.filter((p) => !winnerIds.has(p.userId));
+        await Promise.all(losers.map((p) => triggerCompanionEvent(p.userId, 'mini_game_loss', { roomId })));
+      } catch (e) {
+        console.warn('Failed to trigger companion mini_game_loss events (lucky number):', e);
       }
 
       const winnerNames = exactGuessers.map(p => p.username).join(', ');
@@ -471,6 +491,7 @@ export class LuckyNumberGame implements GameHandler {
     const limit = this.getRoundLimit(game.currentRound);
     const survived: string[] = [];
     const eliminated: string[] = [];
+    const eliminatedIds: string[] = [];
 
     for (const p of updatedPlayers) {
       if (!p.isActive || p.hasCashedOut) continue;
@@ -479,6 +500,7 @@ export class LuckyNumberGame implements GameHandler {
         survived.push(p.username);
       } else {
         eliminated.push(p.username);
+        eliminatedIds.push(p.userId);
         // Mark eliminated
         updatedPlayers = updatedPlayers.map(x => x.userId === p.userId ? { ...x, isActive: false } : x);
       }
@@ -489,6 +511,11 @@ export class LuckyNumberGame implements GameHandler {
 
     if (eliminated.length > 0) {
       await this.sendBotMessage(roomId, `❌ Eliminated: ${eliminated.join(', ')}.`, 'game');
+      try {
+        await Promise.all(eliminatedIds.map((uid) => triggerCompanionEvent(uid, 'mini_game_loss', { roomId })));
+      } catch (e) {
+        console.warn('Failed to trigger companion mini_game_loss events (lucky number elimination):', e);
+      }
     } else {
       await this.sendBotMessage(roomId, `✅ All surviving: ${survived.join(', ')}.`, 'game');
     }

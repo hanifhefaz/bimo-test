@@ -2,6 +2,7 @@ import { motion } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
 import { StatsCard } from '@/components/cards/StatsCard';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { CustomAvatar } from '@/components/CustomAvatar';
 import Username from '@/components/Username';
@@ -19,7 +20,15 @@ import {
   ThumbsUpIcon,
   PawPrint
 } from 'lucide-react';
-import { STORE_ITEMS, collectDailyCredits } from '@/lib/firebaseOperations';
+import {
+  STORE_ITEMS,
+  collectDailyCredits,
+  getActivePetIds,
+  getActiveAssetIds,
+  getActiveAssetQuantity,
+  getPetExpiryTimestamp,
+  getAssetExpiryDisplayEntries
+} from '@/lib/firebaseOperations';
 import { formatWithCommas } from '@/lib/utils';
 import PetAnimation from '@/components/PetAnimation';
 import { getAvatarItemById, getAvatarItemsByType, AVATAR_ITEMS } from '@/lib/avatarItems';
@@ -31,8 +40,15 @@ export default function HomePage() {
   const { userProfile, refreshProfile } = useAuth();
   const navigate = useNavigate();
   const [collecting, setCollecting] = useState(false);
+  const [selectedAssetForExpiry, setSelectedAssetForExpiry] = useState<string | null>(null);
+  const [assetExpiryPage, setAssetExpiryPage] = useState(1);
+  const ASSET_EXPIRY_PAGE_SIZE = 10;
 
   if (!userProfile) return null;
+  const now = Date.now();
+  const fallbackExpiry = now + (365 * 24 * 60 * 60 * 1000);
+  const formatExpiry = (expiry: number | null | undefined) =>
+    new Date((expiry && Number.isFinite(expiry)) ? expiry : fallbackExpiry).toLocaleDateString();
 
   const handleCollectDaily = async () => {
     setCollecting(true);
@@ -51,9 +67,12 @@ export default function HomePage() {
     }
   };
 
-  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && userProfile.pets.includes(i.id));
-  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && userProfile.assets.includes(i.id));
-  const dailyCreditsAvailable = ownedAssets.reduce((sum, a) => sum + (a.dailyCredits || 0), 0);
+  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && getActivePetIds(userProfile, now).includes(i.id));
+  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && getActiveAssetIds(userProfile, now).includes(i.id));
+  const dailyCreditsAvailable = ownedAssets.reduce((sum, a) => {
+    const qty = getActiveAssetQuantity(userProfile, a.id, now);
+    return sum + ((a.dailyCredits || 0) * qty);
+  }, 0);
   // Get equipped avatar items
   const equippedBackground = userProfile.avatarItems?.background ? getAvatarItemById(userProfile.avatarItems.background) : null;
   const equippedFace = userProfile.avatarItems?.face ? getAvatarItemById(userProfile.avatarItems.face) : null;
@@ -140,7 +159,7 @@ export default function HomePage() {
                   <Sparkles className="w-4 h-4 text-primary" />
                   Daily Asset Credits
                 </h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-body text-muted-foreground">
                   {dailyCreditsAvailable} credits available
                 </p>
               </div>
@@ -187,6 +206,9 @@ export default function HomePage() {
                         >
                           <PetAnimation animationData={pet.animationData} size={80} className="rounded-md" />
                           <span className="text-xs mt-2">{pet.name}</span>
+                          <span className="text-[11px] text-muted-foreground mt-1">
+                            Expires: {formatExpiry(getPetExpiryTimestamp(userProfile, pet.id))}
+                          </span>
                         </motion.div>
                       ))}
                     </div>
@@ -201,12 +223,20 @@ export default function HomePage() {
                     </h3>
                     <div className="flex flex-wrap gap-3">
                       {ownedAssets.map((asset) => {
-                        const quantity = userProfile.assetQuantities?.[asset.id] || 1;
+                        const quantity = getActiveAssetQuantity(userProfile, asset.id, now);
+                        const expiryEntries = getAssetExpiryDisplayEntries(userProfile, asset.id, now);
+                        const singleExpiry = quantity === 1 ? expiryEntries[0]?.expiry ?? null : null;
                         return (
                           <motion.div
                             key={asset.id}
                             whileHover={{ scale: 1.1, rotate: -5 }}
-                            className="relative w-28 h-28 rounded-xl bg-primary/20 flex flex-col items-center justify-center border border-white/10"
+                            className={`relative w-28 h-28 rounded-xl bg-primary/20 flex flex-col items-center justify-center border border-white/10 ${quantity > 1 ? 'cursor-pointer' : ''}`}
+                            onClick={() => {
+                              if (quantity > 1) {
+                                setSelectedAssetForExpiry(asset.id);
+                                setAssetExpiryPage(1);
+                              }
+                            }}
                           >
                             {asset.animationData ? (
                               <PetAnimation animationData={asset.animationData} size={60} />
@@ -214,6 +244,11 @@ export default function HomePage() {
                               <span className="text-5xl">{asset.emoji}</span>
                             )}
                             <span className="text-xs mt-1 text-muted-foreground">{asset.name}</span>
+                            {quantity === 1 && (
+                              <span className="text-[11px] text-muted-foreground mt-1">
+                                Expires: {formatExpiry(singleExpiry)}
+                              </span>
+                            )}
                             {quantity > 1 && (
                               <Badge
                                 variant="default"
@@ -230,7 +265,60 @@ export default function HomePage() {
                 )}
           </motion.div>
         )}
+        <Dialog open={!!selectedAssetForExpiry} onOpenChange={(open) => { if (!open) { setSelectedAssetForExpiry(null); setAssetExpiryPage(1); } }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {selectedAssetForExpiry
+                  ? `${STORE_ITEMS.find((i) => i.id === selectedAssetForExpiry)?.name || 'Asset'} Expiry Dates`
+                  : 'Asset Expiry Dates'}
+              </DialogTitle>
+            </DialogHeader>
+            {(() => {
+              const entries = selectedAssetForExpiry
+                ? [...getAssetExpiryDisplayEntries(userProfile, selectedAssetForExpiry, now)]
+                : [];
+              const sortedEntries = entries.sort((a, b) => {
+                if (a.active !== b.active) return a.active ? -1 : 1;
+                if (a.expiry == null && b.expiry == null) return 0;
+                if (a.expiry == null) return 1;
+                if (b.expiry == null) return -1;
+                return a.active ? a.expiry - b.expiry : b.expiry - a.expiry;
+              });
+              const totalPages = Math.max(1, Math.ceil(sortedEntries.length / ASSET_EXPIRY_PAGE_SIZE));
+              const currentPage = Math.min(assetExpiryPage, totalPages);
+              const start = (currentPage - 1) * ASSET_EXPIRY_PAGE_SIZE;
+              const pageItems = sortedEntries.slice(start, start + ASSET_EXPIRY_PAGE_SIZE);
+              return (
+                <>
+            <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+              {pageItems.map((entry, idx) => (
+                <div key={`${selectedAssetForExpiry}-${start + idx}`} className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2 text-sm">
+                  <span>#{start + idx + 1}</span>
+                  <span className={entry.active ? 'text-foreground' : 'text-muted-foreground'}>
+                    {formatExpiry(entry.expiry)}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {sortedEntries.length > ASSET_EXPIRY_PAGE_SIZE && (
+              <div className="mt-3 flex items-center justify-between">
+                <Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setAssetExpiryPage((p) => Math.max(1, p - 1))}>
+                  Previous
+                </Button>
+                <span className="text-xs text-muted-foreground">Page {currentPage} / {totalPages}</span>
+                <Button size="sm" variant="outline" disabled={currentPage >= totalPages} onClick={() => setAssetExpiryPage((p) => Math.min(totalPages, p + 1))}>
+                  Next
+                </Button>
+              </div>
+            )}
+                </>
+              );
+            })()}
+          </DialogContent>
+        </Dialog>
       </div>
     </AppLayout>
   );
 }
+

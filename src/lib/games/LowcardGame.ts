@@ -1,13 +1,14 @@
-// Lowcard Game - Separate game logic
+﻿// Lowcard Game - Separate game logic
 import { ref, get, set, update, remove } from 'firebase/database';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { rtdb, db } from '../firebase';
-import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly } from '../firebaseOperations';
+import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly, incrementMiniGameWins, triggerCompanionEvent } from '../firebaseOperations';
 import { formatWithCommas } from '../utils';
 import { GameHandler, BotMessage, GameSession, GamePlayer } from './types';
 
 const CARD_RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
 const CARD_SUITS = ['♠️', '♥️', '♦️', '♣️']; // Spades, Hearts, Diamonds, Clubs
+const HOUSE_RAKE_RATE = 0.05;
 
 export class LowcardGame implements GameHandler {
   readonly gameType = 'lowcard';
@@ -230,7 +231,7 @@ export class LowcardGame implements GameHandler {
     if (currentGame.tieBreaker?.active) {
       const tiedIds = currentGame.tieBreaker.tiedPlayerIds || [];
       if (!tiedIds.includes(senderId)) {
-        return [{ content: 'Tie-breaker in progress — only tied players may draw.', type: 'private', targetUserId: senderId }];
+        return [{ content: 'Tie-breaker in progress - only tied players may draw.', type: 'private', targetUserId: senderId }];
       }
     }
 
@@ -310,7 +311,7 @@ export class LowcardGame implements GameHandler {
         });
       }
       await remove(gameRef);
-      await this.sendBotMessage(roomId, '❌ Not enough players joined. Game cancelled!', 'game');
+      await this.sendBotMessage(roomId, ' Not enough players joined. Game cancelled!', 'game');
       return;
     }
 
@@ -427,7 +428,7 @@ export class LowcardGame implements GameHandler {
 
     await this.sendBotMessage(
       roomId,
-      `❌ ${loser.username}: OUT with the lowest card! ${loser.currentCard?.display}`,
+      ` ${loser.username}: OUT with the lowest card! ${loser.currentCard?.display}`,
       'game'
     );
 
@@ -460,9 +461,19 @@ export class LowcardGame implements GameHandler {
   private async endGame(roomId: string, winner: GamePlayer, game: GameSession) {
     const gameRef = ref(rtdb, `games/${roomId}/lowcard`);
     const totalPot = (game.betAmount || 0) * (game.players?.length || 0);
+    const winnerPayout = Number((totalPot * (1 - HOUSE_RAKE_RATE)).toFixed(2));
 
-    await updateCredits(winner.userId, totalPot);
+    await updateCredits(winner.userId, winnerPayout);
     try { await addXP(winner.userId, 20); } catch (e) { console.warn('Failed to award winner XP (lowcard):', e); }
+    try { await incrementMiniGameWins(winner.userId); } catch (e) { console.warn('Failed to track mini-game win (lowcard):', e); }
+    try { await triggerCompanionEvent(winner.userId, 'mini_game_win', { roomId }); } catch (e) { console.warn('Failed to trigger companion mini_game_win (lowcard):', e); }
+    try { await triggerCompanionEvent(winner.userId, 'high_amount_game_win', { roomId, amount: winnerPayout }); } catch (e) { console.warn('Failed to trigger companion high_amount_game_win (lowcard):', e); }
+    try {
+      const losers = (game.players || []).filter((p) => p.userId !== winner.userId);
+      await Promise.all(losers.map((p) => triggerCompanionEvent(p.userId, 'mini_game_loss', { roomId })));
+    } catch (e) {
+      console.warn('Failed to trigger companion mini_game_loss events (lowcard):', e);
+    }
 
     // Record transaction for game win
     await addDoc(collection(db, 'transactions'), {
@@ -470,7 +481,7 @@ export class LowcardGame implements GameHandler {
       to: winner.userId,
       participants: [winner.userId],
       toUsername: winner.username,
-      amount: totalPot,
+      amount: winnerPayout,
       type: 'game',
       description: 'Lowcard game winner',
       timestamp: serverTimestamp()
@@ -480,16 +491,8 @@ export class LowcardGame implements GameHandler {
 
     await this.sendBotMessage(
       roomId,
-      ` Lowcard game over! ${winner.username} WINS USD ${formatWithCommas(totalPot)}! CONGRATS!`,
+      ` Lowcard game over! ${winner.username} WINS USD ${formatWithCommas(winnerPayout)}! CONGRATS!`,
       'game'
-    );
-
-    // Private notification to the winner
-    await this.sendBotMessage(
-      roomId,
-      `🎉 Congratulations ${winner.username}! You won USD ${formatWithCommas(totalPot)}!`,
-      'private',
-      winner.userId
     );
 
     setTimeout(async () => { try { await remove(gameRef); } catch {} }, 5000);
@@ -514,3 +517,4 @@ export class LowcardGame implements GameHandler {
 
 // Singleton instance
 export const lowcardGame = new LowcardGame();
+

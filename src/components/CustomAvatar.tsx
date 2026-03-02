@@ -3,8 +3,7 @@ import {
   getAvatarItemById,
   computeFrameCss,
   needsSvgBorder,
-  makeBorderPoints,
-  BorderStyle
+  makeBorderPoints
 } from '@/lib/avatarItems';
 
 interface AvatarItems {
@@ -37,61 +36,55 @@ export function CustomAvatar({ avatar, imageUrl, avatarItems, size = 'md', class
   const resolvedFace = avatarItems?.face ? getAvatarItemById(avatarItems.face) : undefined;
   const resolvedFrame = avatarItems?.frame ? getAvatarItemById(avatarItems.frame) : undefined;
 
-  const bgStyle = resolvedBg?.cssValue ? { background: resolvedBg.cssValue } : undefined;
-  const bgContent = resolvedBg?.emoji ?? (avatarItems?.background && !resolvedBg ? avatarItems.background : undefined);
   const faceContent = resolvedFace?.emoji ?? (avatarItems?.face && !resolvedFace ? avatarItems.face : undefined);
+  const frameShapeClass = isRectFrameStyle(resolvedFrame?.borderStyle) ? 'rounded-lg' : 'rounded-full';
+  const frameStrokeColor = resolveFrameStrokeColor(resolvedBg?.cssValue);
 
   // compute whatever CSS and helper classes are needed for the frame
-  const { style: frameStyle, className: frameClass } = computeFrameCss(resolvedFrame, 4);
-  const frameContent = resolvedFrame?.emoji;
+  const { style: frameStyle, className: frameClass } = computeFrameCss(resolvedFrame, 4, frameStrokeColor);
 
   const isSvgBorder = needsSvgBorder(resolvedFrame?.borderStyle);
 
   return (
-    // outer wrapper holds the optional frame border; ensure it's always a circle
-    // so the border follows the rounded background and avatar inside.
     <div
-      className={cn('relative rounded-full overflow-hidden', sizeClasses[size], className, frameClass)}
+      className={cn('relative overflow-hidden', frameShapeClass, sizeClasses[size], className, frameClass)}
       style={frameStyle}
     >
-      {isSvgBorder && resolvedFrame?.cssValue && (
+      {isSvgBorder && (
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
           viewBox="0 0 100 100"
         >
           <polygon
-            points={makeBorderPoints(resolvedFrame?.borderStyle as BorderStyle)}
-            stroke={resolvedFrame.cssValue}
+            points={makeBorderPoints(resolvedFrame?.borderStyle)}
             strokeWidth="4"
             strokeLinejoin="miter"
+            fill="none"
+            stroke={frameStrokeColor}
           />
         </svg>
       )}
 
-      {frameContent && (
-        <span className="absolute inset-0 flex items-center justify-center opacity-50 pointer-events-none">
-          {frameContent}
-        </span>
-      )}
-
       <div
-        style={bgStyle}
-        className="rounded-full flex items-center justify-center relative shrink-0 w-full h-full"
+        className={cn('flex items-center justify-center relative shrink-0 w-full h-full', frameShapeClass)}
       >
-        {/* Background layer (emoji fallback) */}
-        {bgContent && (
-          <span className="absolute inset-0 flex items-center justify-center opacity-30">
-            {bgContent}
-          </span>
-        )}
-
-        {/* Main avatar: prefer uploaded image, fallback to face item (if equipped), otherwise avatar emoji */}
         {imageUrl ? (
-          <img src={imageUrl} alt="avatar" className="relative z-10 w-full h-full object-cover rounded-full" />
+          <img src={imageUrl} alt="avatar" className={cn('relative z-10 w-full h-full object-cover', frameShapeClass)} />
         ) : (
           <span className="relative z-10">{faceContent ?? avatar}</span>
         )}
       </div>
     </div>
   );
+}
+
+function resolveFrameStrokeColor(backgroundCss?: string): string {
+  if (!backgroundCss) return '#000000';
+  const firstColor = backgroundCss.match(/#(?:[0-9a-fA-F]{3}){1,2}|rgba?\([^)]+\)|hsla?\([^)]+\)/)?.[0];
+  return firstColor || '#000000';
+}
+
+function isRectFrameStyle(style?: string): boolean {
+  return style === 'square'
+    || style === 'rounded-rectangle';
 }

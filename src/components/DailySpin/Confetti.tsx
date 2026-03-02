@@ -1,24 +1,32 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { useMemo } from 'react';
 
 const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#10b981', '#06b6d4', '#7c3aed', '#ec4899'];
 
 export default function Confetti({ count = 24 }: { count?: number }) {
-  const pieces = Array.from({ length: count });
+  const pieces = useMemo(() => {
+    return Array.from({ length: count }, (_, i) => ({
+      id: i,
+      left: Math.random() * 100,
+      size: 6 + Math.random() * 10,
+      color: COLORS[i % COLORS.length],
+      rotate: Math.random() * 360,
+      endY: 300 + Math.random() * 200,
+      duration: 1.6 + Math.random() * 0.8,
+    }));
+  }, [count]);
 
   return (
     <div className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
-      {pieces.map((_, i) => {
-        const left = Math.random() * 100;
-        const size = 6 + Math.random() * 10;
-        const color = COLORS[i % COLORS.length];
+      {pieces.map((piece) => {
         return (
           <motion.div
-            key={i}
-            initial={{ opacity: 1, y: -20, rotate: Math.random() * 360, x: `${left}%` }}
-            animate={{ opacity: 0, y: 300 + Math.random() * 200 }}
-            transition={{ duration: 1.6 + Math.random() * 0.8, ease: 'easeOut' }}
-            style={{ width: size, height: size, background: color, left: `${left}%` }}
+            key={piece.id}
+            initial={{ opacity: 1, y: -20, rotate: piece.rotate, x: `${piece.left}%` }}
+            animate={{ opacity: 0, y: piece.endY }}
+            transition={{ duration: piece.duration, ease: 'easeOut' }}
+            style={{ width: piece.size, height: piece.size, background: piece.color, left: `${piece.left}%` }}
             className="absolute rounded-sm"
           />
         );

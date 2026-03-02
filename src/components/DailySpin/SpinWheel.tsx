@@ -135,7 +135,7 @@ export default function SpinWheel({ rewards, rotation, spinning, size = 320, sho
       <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-30">
         <div className="w-24 h-24 rounded-full bg-gradient-to-b from-white/90 to-white/70 flex items-center justify-center border border-white/20 shadow">
           <div className="text-center">
-            <div className="text-xs text-muted-foreground">Tap to</div>
+            <div className="text-caption text-muted-foreground">Tap to</div>
             <div className="font-bold text-lg">Spin</div>
           </div>
         </div>
@@ -143,3 +143,4 @@ export default function SpinWheel({ rewards, rotation, spinning, size = 320, sho
     </div>
   );
 }
+

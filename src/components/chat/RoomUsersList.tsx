@@ -9,12 +9,11 @@ import { Users, MessageCircle, Shield, Crown, Eye, UserPlus, UserCheck } from 'l
 import { CustomAvatar } from '@/components/CustomAvatar';
 import Username from '@/components/Username';
 import PetAnimation from '@/components/PetAnimation';
-import { getUserById, getPrivateConversationId, subscribeToRoomParticipants, getMostExpensivePet, sendFriendRequest } from '@/lib/firebaseOperations';
-import { presenceToColorClass, presenceLabel, isFriendRequestPending } from '@/lib/utils';
+import { getUserById, getPrivateConversationId, getMostExpensivePet, sendFriendRequest } from '@/lib/firebaseOperations';
+import { presenceToColorClass, isFriendRequestPending } from '@/lib/utils';
 import { UserProfile } from '@/contexts/AuthContext';
 import { getBadgeForLevel } from '@/lib/badges';
-import { ref, onValue, off } from 'firebase/database';
-import { rtdb } from '@/lib/firebase';
+import { useRealtimePresence, resolvePresence } from '@/hooks/useRealtimePresence';
 import { toast } from 'sonner';
 
 interface RoomUsersListProps {
@@ -24,49 +23,17 @@ interface RoomUsersListProps {
   moderators: string[];
 }
 
-interface PresenceMap {
-  [key: string]: 'online' | 'away' | 'busy' | 'offline';
-}
-
 export function RoomUsersList({ roomId, participants: initialParticipants, ownerId, moderators }: RoomUsersListProps) {
   const navigate = useNavigate();
   const { userProfile, refreshProfile } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
-  const [participants, setParticipants] = useState<string[]>(initialParticipants);
-  const [onlineStatus, setOnlineStatus] = useState<PresenceMap>({});
   const [loading, setLoading] = useState(true);
   const [sendingRequests, setSendingRequests] = useState<{ [key: string]: boolean }>({});
-
-  useEffect(() => {
-    // Subscribe to real-time participant updates
-    const unsubscribe = subscribeToRoomParticipants(roomId, (updatedParticipants) => {
-      setParticipants(updatedParticipants);
-    });
-
-    return () => unsubscribe();
-  }, [roomId]);
+  const participants = initialParticipants;
+  const presenceMap = useRealtimePresence(users);
 
   useEffect(() => {
     loadUsers();
-    // Subscribe to online status
-    const statusRefs: { [key: string]: any } = {};
-
-    participants.forEach(uid => {
-      const statusRef = ref(rtdb, `status/${uid}`);
-      statusRefs[uid] = statusRef;
-      onValue(statusRef, (snapshot) => {
-        const data = snapshot.val();
-        const presenceVal: 'online'|'away'|'busy'|'offline' = data?.presence || (data?.isOnline ? 'online' : 'offline');
-        setOnlineStatus(prev => ({
-          ...prev,
-          [uid]: presenceVal
-        }));
-      });
-    });
-
-    return () => {
-      Object.values(statusRefs).forEach(statusRef => off(statusRef));
-    };
   }, [participants]);
 
   const loadUsers = async () => {
@@ -120,11 +87,11 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
     // Then moderators
     if (moderators.includes(a.uid) && !moderators.includes(b.uid)) return -1;
     if (!moderators.includes(a.uid) && moderators.includes(b.uid)) return 1;
-    // Then by presence order
-    const order: Record<string, number> = { online: 0, away: 1, busy: 2, offline: 3 };
-    const pa = onlineStatus[a.uid] || (a.isOnline ? 'online' : 'offline');
-    const pb = onlineStatus[b.uid] || (b.isOnline ? 'online' : 'offline');
-    if (order[pa] !== order[pb]) return order[pa] - order[pb];
+      // Then by presence order
+      const order: Record<string, number> = { online: 0, away: 1, busy: 2, offline: 3 };
+      const pa = presenceMap[a.uid] || resolvePresence(a.presence, a.isOnline);
+      const pb = presenceMap[b.uid] || resolvePresence(b.presence, b.isOnline);
+      if (order[pa] !== order[pb]) return order[pa] - order[pb];
     // Then by level
     return b.level - a.level;
   });
@@ -150,7 +117,7 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
               const badge = getBadgeForLevel(user.level);
               const isOwner = user.uid === ownerId;
               const isMod = moderators.includes(user.uid);
-              const presenceVal = onlineStatus[user.uid] || (user.isOnline ? 'online' : 'offline');
+              const presenceVal = presenceMap[user.uid] || resolvePresence(user.presence, user.isOnline);
               const isSelf = user.uid === userProfile?.uid;
               const expensivePet = getMostExpensivePet(user.pets);
 
@@ -160,10 +127,10 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
                   initial={{ opacity: 0, x: 20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: index * 0.03 }}
-                  className={`flex items-center gap-3 p-3 rounded-xl ${
+                  className={`flex items-center gap-3 p-3 rounded-xl border ${
                     isOwner ? 'bg-gold/10 border border-gold/30' :
                     isMod ? 'bg-primary/10 border border-primary/30' :
-                    'bg-secondary/30'
+                    'bg-card/70 border-border'
                   }`}
                 >
                   {/* Avatar with online indicator */}
@@ -186,16 +153,16 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
                       {isOwner && <Crown className="w-3 h-3 text-gold" />}
                       {isMod && !isOwner && <Shield className="w-3 h-3 text-primary" />}
                       <Username user={user} className="font-medium truncate" />
-                      <span className={`text-xs ${badge.color}`}>{badge.emoji}</span>
+                      <span className={`text-caption ${badge.color}`}>{badge.emoji}</span>
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 text-caption text-muted-foreground">
                       <span>{user.level}</span>
                       {expensivePet && (
                         <div className="flex items-center gap-1">
                           <div style={{ width: 20, height: 20 }}>
                             <PetAnimation animationData={expensivePet.pet.animationData} size={20} />
                           </div>
-                          <span className="text-xs">{expensivePet.pet.name}</span>
+                          <span className="text-caption">{expensivePet.pet.name}</span>
                         </div>
                       )}
                     </div>
@@ -207,7 +174,7 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-8 w-8"
+                        className="tap-target h-9 w-9"
                         onClick={() => handleViewProfile(user.uid)}
                       >
                         <Eye className="w-4 h-4" />
@@ -215,7 +182,7 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
                       <Button
                         variant="ghost"
                         size="icon"
-                        className="h-8 w-8"
+                        className="tap-target h-9 w-9"
                         onClick={() => handlePrivateChat(user.uid)}
                       >
                         <MessageCircle className="w-4 h-4" />
@@ -228,7 +195,7 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
 
                         if (isFriend) {
                           return (
-                            <Button variant="ghost" size="icon" className="h-8 w-8" disabled>
+                            <Button variant="ghost" size="icon" className="tap-target h-9 w-9" disabled>
                               <UserCheck className="w-4 h-4 text-success" />
                             </Button>
                           );
@@ -236,8 +203,8 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
 
                         if (requestSent) {
                           return (
-                            <Button variant="ghost" size="icon" className="h-8 w-20" disabled>
-                              <span className="text-xs">Pending</span>
+                            <Button variant="ghost" size="icon" className="tap-target h-9 w-20" disabled>
+                              <span className="text-caption">Pending</span>
                             </Button>
                           );
                         }
@@ -246,7 +213,7 @@ export function RoomUsersList({ roomId, participants: initialParticipants, owner
                           <Button
                             variant="ghost"
                             size="icon"
-                            className="h-8 w-8"
+                            className="tap-target h-9 w-9"
                             onClick={() => handleAddFriend(user.uid)}
                             disabled={!!sendingRequests[user.uid]}
                           >

@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Home, Users, MessageCircle, Store, Trophy, Compass, Gift, User, X, Mail, Star, List, BellRingIcon } from 'lucide-react';
+import { Home, Users, MessageCircle, Store, Trophy, Compass, User, X, Mail, Star, List, BellRingIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useRoomTabs } from '@/contexts/RoomTabsContext';
@@ -8,22 +8,21 @@ import { ScrollArea, ScrollBar } from '@/components/ui/scroll-area';
 
 const mainTabs = [
   { id: 'home', path: '/', icon: Home, label: 'Home' },
-  { id: 'friends', path: '/friends', icon: Users, label: 'Friends' },
   { id: 'chatrooms', path: '/chatrooms', icon: MessageCircle, label: 'Rooms' },
+  { id: 'friends', path: '/friends', icon: Users, label: 'Friends' },
   { id: 'people', path: '/people', icon: List, label: 'People' },
   { id: 'contests', path: '/contests', icon: Star, label: 'Contests' },
   { id: 'store', path: '/store', icon: Store, label: 'Store' },
   { id: 'leaderboards', path: '/leaderboards', icon: Trophy, label: 'Ranks' },
-  { id: 'profile', path: '/profile', icon: User, label: 'My Profile' },
   { id: 'news', path: '/news', icon: BellRingIcon, label: 'News' },
-//   { id: 'daily', path: '/daily-spin', icon: Gift, label: 'Daily Spin' },
+  { id: 'profile', path: '/profile', icon: User, label: 'Profile' },
   { id: 'help', path: '/help', icon: Compass, label: 'Help' },
 ];
 
 export function TopTabs() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { openTabs, activeTab, setActiveTab, closeRoomTab, closePrivateChatTab } = useRoomTabs();
+  const { openTabs, activeTab, setActiveTab, markTabAsRead, closeRoomTab, closePrivateChatTab } = useRoomTabs();
   const { userProfile } = useAuth();
 
   const handleTabClick = (tabId: string, path?: string) => {
@@ -37,6 +36,7 @@ export function TopTabs() {
         navigate(`/messages/${tabId}?friendId=${tab.friendId}`);
       } else {
         // It's a room tab
+        markTabAsRead(tabId);
         navigate(`/chat/${tabId}`);
       }
     }
@@ -68,9 +68,9 @@ export function TopTabs() {
 
 
   return (
-    <div className="fixed top-14 left-0 right-0 z-40 bg-background/95 backdrop-blur border-b border-border">
+    <div className="fixed top-14 left-0 right-0 z-40 bg-background/95 backdrop-blur border-b border-border/80">
       <ScrollArea className="w-full">
-        <div className="flex items-center h-11 w-full max-w-4xl mx-auto px-2 gap-1">
+        <div className="flex items-center h-12 w-full max-w-4xl mx-auto px-2 gap-1">
           {/* Main Navigation Tabs */}
           {mainTabs.map((tab) => {
             const isActive = !isRoomPath && !isPrivateMessagePath && (
@@ -86,15 +86,23 @@ export function TopTabs() {
                 key={tab.id}
                 onClick={() => handleTabClick(tab.id, tab.path)}
                 className={cn(
-                  "flex-1 md:flex-initial flex items-center gap-1 px-2 md:px-3 py-2 md:py-1.5 rounded-t-lg text-xs font-medium transition-all whitespace-nowrap justify-center md:justify-start relative -mb-px",
+                  "tap-target group flex-initial flex items-center gap-1.5 px-2.5 md:px-3 py-2 md:py-1.5 rounded-xl text-xs font-medium transition-all whitespace-nowrap justify-center md:justify-start relative min-h-[44px]",
                   isActive
-                    ? "bg-primary text-primary-foreground border-b-2 border-primary shadow-sm"
-                    : "text-muted-foreground hover:text-foreground hover:bg-muted border-b-2 border-transparent"
+                    ? "bg-primary/15 text-primary border border-primary/30 shadow-sm"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted/70 border border-transparent"
                 )}
                 aria-current={isActive ? 'page' : undefined}
               >
-                <Icon className="w-5 h-5 md:w-3.5 md:h-3.5" />
-                <span className={cn("ml-1 overflow-hidden transition-all", isActive ? "inline" : "hidden md:inline")}>{tab.label}</span>
+                <Icon className="w-5 h-5 md:w-3.5 md:h-3.5 shrink-0" />
+                <span
+                  className={cn(
+                    "ml-1 transition-all",
+                    isActive ? "inline-block max-w-[120px] truncate" : "hidden md:inline"
+                  )}
+                >
+                  {tab.label}
+                </span>
+                {isActive && <span className="absolute -bottom-1 left-2 right-2 h-0.5 rounded-full bg-primary" />}
               </button>
             );
           })}
@@ -120,18 +128,27 @@ export function TopTabs() {
                   exit={{ opacity: 0, scale: 0.8, width: 0 }}
                   onClick={() => handleTabClick(tab.id)}
                   className={cn(
-                    "flex-1 md:flex-initial flex items-center gap-1 px-2 md:px-3 py-2 md:py-1.5 rounded-t-lg text-xs font-medium transition-all whitespace-nowrap relative -mb-px",
-                    isActive
+                  "tap-target flex-initial flex items-center gap-1 px-2.5 md:px-3 py-2 md:py-1.5 rounded-xl text-xs font-medium transition-all whitespace-nowrap relative min-h-[44px]",
+                  isActive
                       ? tab.isPrivateChat
-                        ? "bg-success/80 text-success-foreground border-b-2 border-success shadow-sm"
-                        : "bg-accent text-accent-foreground border-b-2 border-accent shadow-sm"
-                      : tab.hasUnread
-                        ? "bg-primary/20 text-primary animate-pulse border-b-2 border-transparent"
-                        : "text-muted-foreground hover:text-foreground hover:bg-muted border-b-2 border-transparent"
-                  )}
-                >
-                  <Icon className="w-5 h-5 md:w-3.5 md:h-3.5" />
-                  <span className={cn("ml-1 max-w-[80px] truncate overflow-hidden transition-all", isActive ? "inline" : "hidden md:inline")}>{tab.name}</span>
+                        ? "bg-success/15 text-success border border-success/30 shadow-sm"
+                        : "bg-accent/15 text-accent border border-accent/30 shadow-sm"
+                      : (tab.hasUnread && !tab.isPrivateChat)
+                        ? "bg-orange-500/20 text-orange-600 border border-orange-500/50 animate-pulse"
+                        : tab.hasUnread
+                          ? "bg-primary/15 text-primary border border-primary/30 animate-pulse"
+                        : "text-muted-foreground hover:text-foreground hover:bg-muted/70 border border-transparent"
+                )}
+              >
+                  <Icon className="w-5 h-5 md:w-3.5 md:h-3.5 shrink-0" />
+                  <span
+                    className={cn(
+                      "ml-1 max-w-[96px] truncate overflow-hidden transition-all",
+                      isActive ? "inline-block" : "hidden md:inline"
+                    )}
+                  >
+                    {tab.name}
+                  </span>
                   {/* Close button - always visible on mobile when active */}
                   <button
                     onClick={(e) => handleCloseTab(e, tab)}
@@ -143,7 +160,7 @@ export function TopTabs() {
                   >
                     <X className="w-3 h-3" />
                   </button>
-                  {tab.hasUnread && !isActive && (
+                  {tab.hasUnread && !isActive && tab.isPrivateChat && (
                     <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-destructive animate-pulse" />
                   )}
                 </motion.button>

@@ -30,10 +30,10 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <Gift className="w-5 h-5 text-gold animate-bounce" />
-          <span className="font-semibold text-primary">
+          <span className="heading-tight font-semibold text-primary">
             {isEnded ? 'Gift Contest Ended' : 'Gift Shower Contest!'}
           </span>
-          {!isEnded && <span className="font-semibold text-accent">Top 5 users will share the prize!</span>}
+          {!isEnded && <span className="text-body font-semibold text-accent">Top 5 users will share the prize!</span>}
         </div>
         {!isEnded && (
           <div className="flex items-center gap-1 text-sm">
@@ -47,7 +47,7 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
 
       <div className="flex items-center gap-2 mb-2">
         <Trophy className="w-4 h-4 text-accent" />
-        <span className="text-sm">Prize: <span className="font-bold text-accent">{contest.prizeCredits} USD</span></span>
+            <span className="text-body">Prize: <span className="font-bold text-accent">{contest.prizeCredits} USD</span></span>
       </div>
       {contest.giftId && (() => {
         const gift = GIFTS.find(g => g.id === contest.giftId);
@@ -55,7 +55,7 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
           return (
             <div className="flex items-center gap-2 mb-2">
               <Gift className="w-4 h-4 text-gold" />
-              <span className="text-sm">Eligible gift: <span className="font-bold text-accent">{gift.emoji} {gift.name}</span></span>
+              <span className="text-body">Eligible gift: <span className="font-bold text-accent">{gift.emoji} {gift.name}</span></span>
             </div>
           );
         }
@@ -64,7 +64,7 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
 
       {/* {leaderboard.length > 0 && (
         <div className="mt-2 space-y-1">
-          <p className="text-xs text-muted-foreground">Top Gifters:</p>
+          <p className="text-caption text-muted-foreground">Top Gifters:</p>
           {leaderboard.slice(0, 5).map((entry, index) => (
             <div key={entry.userId} className="flex items-center justify-between text-xs">
               <div className="flex items-center gap-1">
@@ -85,7 +85,7 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
         </p>
       ) : (
         <>
-          <p className="text-xs text-muted-foreground mt-2 text-center">
+          <p className="text-caption text-muted-foreground mt-2 text-center">
             {contest.giftId
               ? (() => {
                   const gift = GIFTS.find(g => g.id === contest.giftId);
@@ -95,7 +95,7 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
                 })()
               : 'Send gifts using "/gift gift_name" or "/shower gift_name" to compete!'}
           </p>
-          <p className="text-sm text-muted-foreground mt-2 text-center">
+          <p className="text-body text-muted-foreground mt-2 text-center">
             Check the leaderboard
           </p>
         </>
@@ -103,3 +103,4 @@ export function GiftContestBanner({ contest }: GiftContestBannerProps) {
     </motion.div>
   );
 }
+

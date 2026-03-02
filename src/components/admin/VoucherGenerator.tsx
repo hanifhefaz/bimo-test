@@ -253,21 +253,21 @@ export default function VoucherGenerator() {
   return (
     <div className="mt-6 p-4 rounded-xl bg-secondary/20 border border-white/5">
       <h4 className="font-semibold mb-2 text-sky-500">Admin — Generate Voucher Cards</h4>
-      <p className="text-sm text-muted-foreground mb-3">Create 14-digit voucher codes for printing. Codes are stored hashed server-side.</p>
+      <p className="text-body text-muted-foreground mb-3">Create 14-digit voucher codes for printing. Codes are stored hashed server-side.</p>
 
       <div className="flex items-end gap-4 mb-3">
         <div className="flex flex-col gap-1">
-          <label htmlFor="amount" className="text-xs text-muted-foreground">Amount</label>
+          <label htmlFor="amount" className="text-caption text-muted-foreground">Amount</label>
           <input id="amount" type="number" className="rounded px-2 py-1 bg-background border" value={amount} onChange={e => setAmount(Number(e.target.value))} min={1} />
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="quantity" className="text-xs text-muted-foreground">Quantity</label>
+          <label htmlFor="quantity" className="text-caption text-muted-foreground">Quantity</label>
           <input id="quantity" type="number" className="rounded px-2 py-1 bg-background border" value={quantity} onChange={e => setQuantity(Number(e.target.value))} min={1} max={1000} />
         </div>
 
         <div className="flex flex-col gap-1">
-          <label htmlFor="price" className="text-xs text-muted-foreground">Price</label>
+          <label htmlFor="price" className="text-caption text-muted-foreground">Price</label>
           <input id="price" type="number" step="0.01" className="rounded px-2 py-1 bg-background border w-28" value={price} onChange={e => setPrice(Number(e.target.value))} min={0} />
         </div>
 
@@ -278,10 +278,10 @@ export default function VoucherGenerator() {
 
       {codes.length > 0 && (
         <div>
-          <p className="text-xs text-muted-foreground mb-2">Plain codes (copy for printing). Keep these secure — they cannot be recovered once lost.</p>
+          <p className="text-caption text-muted-foreground mb-2">Plain codes (copy for printing). Keep these secure — they cannot be recovered once lost.</p>
 
           <div className="flex items-center gap-2 mb-2">
-            <label className="text-xs text-muted-foreground">Rows per column:</label>
+            <label className="text-caption text-muted-foreground">Rows per column:</label>
             <select className="rounded px-2 py-1 bg-background border" value={rowsPerPage} onChange={e => setRowsPerPage(Number(e.target.value))}>
               <option value={5}>5</option>
               <option value={10}>10</option>
@@ -304,3 +304,4 @@ export default function VoucherGenerator() {
     </div>
   );
 }
+

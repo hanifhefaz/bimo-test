@@ -12,9 +12,9 @@ import {
   browserLocalPersistence,
   browserSessionPersistence
 } from 'firebase/auth';
-import { doc, setDoc, getDoc, updateDoc, serverTimestamp, onSnapshot, runTransaction, deleteField } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, serverTimestamp, onSnapshot, runTransaction, deleteField, increment, collection } from 'firebase/firestore';
 import { toast } from 'sonner';
-import { getUserByUsername, getUserById, invalidateUserCache } from '@/lib/firebaseOperations';
+import { getUserByUsername, getUserById, invalidateUserCache, createUserAlert } from '@/lib/firebaseOperations';
 import { isValidUsername, normalizeUsername, isEmail } from '@/lib/utils';
 import { ref, set, onDisconnect, serverTimestamp as rtdbServerTimestamp } from 'firebase/database';
 import { auth, db, rtdb } from '@/lib/firebase';
@@ -27,6 +27,7 @@ export interface UserProfile {
   username: string;
   usernameLower?: string;
   email: string;
+  emailLower?: string;
   fullName: string;
   age: number;
   gender: string;
@@ -45,9 +46,23 @@ export interface UserProfile {
   xp: number;
   friends: string[];
   friendRequests: string[];
+  blockedUsers?: string[];
   pets: string[];
   assets: string[];
   assetQuantities?: { [key: string]: number };
+  petExpiryMap?: { [key: string]: number };
+  assetExpiryMap?: { [key: string]: number[] };
+  ownedCompanions?: string[];
+  equippedCompanionId?: string | null;
+  companionSettings?: {
+    enabled: boolean;
+    publicReactions: boolean;
+  };
+  companionState?: {
+    lastPublicAt?: number;
+    lastTriggerAtByType?: { [key: string]: number };
+    winStreak?: number;
+  };
   ownedEmoticonPacks?: string[];
   ownedAvatarItems: string[];
   ownedMerchantPacks?: string[];
@@ -88,6 +103,20 @@ export interface UserProfile {
   presence?: 'online' | 'away' | 'busy' | 'offline';
   // timestamp of the last time weekly counters were cleared for this user
   lastWeeklyReset?: any;
+  dailyMissions?: {
+    resetAt?: number;
+    updatedAt?: number;
+    allCompleted?: boolean;
+    allCompletedRewarded?: boolean;
+    roomsVisitedToday?: string[];
+    missions?: Record<string, {
+      progress: number;
+      target: number;
+      xp: number;
+      completed: boolean;
+      rewarded: boolean;
+    }>;
+  };
 }
 
 interface SignUpData {
@@ -182,7 +211,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         profileLikes: data.profileLikes || 0,
         favoriteRooms: data.favoriteRooms || [],
         recentRooms: data.recentRooms || [],
+        blockedUsers: data.blockedUsers || [],
         ownedAvatarItems: data.ownedAvatarItems || [],
+        ownedCompanions: data.ownedCompanions || [],
+        equippedCompanionId: data.equippedCompanionId || null,
+        companionSettings: data.companionSettings || { enabled: true, publicReactions: true },
+        companionState: data.companionState || { lastPublicAt: 0, lastTriggerAtByType: {}, winStreak: 0 },
         avatarItems: data.avatarItems || {},
         statusMessage: data.statusMessage || '',
         fullName: data.fullName || '',
@@ -263,7 +297,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       toast({
         title: 'Logged out for inactivity',
-        description: 'You were logged out after 10 minutes of inactivity to protect your account.',
+        description: 'You were logged out after 20 minutes of inactivity to protect your account.',
       });
     } catch (e) {
       // ignore toast errors
@@ -276,14 +310,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Inactivity watcher - listens for user interactions and logs out after period of inactivity
   const startInactivityWatcher = (uid: string) => {
-    const INACTIVE_MS = 10 * 60 * 1000; // 10 minutes
+    const INACTIVE_MS = 20 * 60 * 1000; // 20 minutes
     let lastUpdate = 0;
     let timeoutHandle: any = null;
 
     const refreshActivity = async () => {
       const now = Date.now();
-      // Update lastActive in firestore at most once per 60 seconds
-      if (now - (lastUpdate || 0) > 60 * 1000) {
+      // Update lastActive sparsely to reduce write pressure (at most once per 5 minutes).
+      if (now - (lastUpdate || 0) > 5 * 60 * 1000) {
         try {
           await updateDoc(doc(db, 'users', uid), { lastActive: serverTimestamp() });
           lastUpdate = now;
@@ -385,6 +419,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 return;
               }
 
+              // Check if user was banned while online
+              if (data.isBanned) {
+                signOut(auth);
+                setUserProfile(null);
+                return;
+              }
+
               // Update user profile with latest data (including unreadMessages and avatar)
               setUserProfile(prev => prev ? {
                 ...prev,
@@ -394,11 +435,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 level: data.level ?? prev.level,
                 friends: data.friends ?? prev.friends,
                 friendRequests: data.friendRequests ?? prev.friendRequests,
+                blockedUsers: data.blockedUsers ?? prev.blockedUsers ?? [],
                 avatar: data.avatar ?? prev.avatar,
                 avatarItems: data.avatarItems ?? prev.avatarItems,
                 profileImageUrl: data.profileImageUrl ?? prev.profileImageUrl,
                 profileImagePath: data.profileImagePath ?? prev.profileImagePath,
                 unconvertedGifts: data.unconvertedGifts ?? prev.unconvertedGifts ?? 0,
+                ownedCompanions: data.ownedCompanions ?? prev.ownedCompanions ?? [],
+                equippedCompanionId: data.equippedCompanionId ?? prev.equippedCompanionId ?? null,
+                companionSettings: data.companionSettings ?? prev.companionSettings ?? { enabled: true, publicReactions: true },
+                companionState: data.companionState ?? prev.companionState ?? { lastPublicAt: 0, lastTriggerAtByType: {}, winStreak: 0 },
               } : null);
             }
           });
@@ -465,6 +511,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         throw new Error('Please verify your email before logging in. Check your inbox for the verification link.');
       }
 
+      // Check if user is banned before completing sign-in
+      const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
+      if (userDoc.exists()) {
+        const userData = userDoc.data();
+        if (userData.isBanned) {
+          await signOut(auth);
+          throw new Error(`Your account has been suspended. Reason: ${userData.banReason || 'Contact admin for details'}`);
+        }
+      }
+
       // On successful sign-in, clear the global loading flag so ProtectedRoute renders the
       // home layout immediately (it will show skeletons while the profile finishes loading).
       setLoading(false);
@@ -495,6 +551,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       username,
       usernameLower: normalized,
       email,
+      emailLower: email.trim().toLowerCase(),
       fullName: data.fullName,
       age: data.age,
       gender: data.gender,
@@ -507,8 +564,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       xp: 0,
       friends: [],
       friendRequests: [],
+      blockedUsers: [],
       pets: [],
       assets: [],
+      petExpiryMap: {},
+      assetExpiryMap: {},
+      ownedCompanions: [],
+      equippedCompanionId: null,
+      companionSettings: { enabled: true, publicReactions: true },
+      companionState: { lastPublicAt: 0, lastTriggerAtByType: {}, winStreak: 0 },
       ownedAvatarItems: [],
       giftsSent: 0,
       giftsReceived: 0,
@@ -531,22 +595,104 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       lastDailyCollection: null,
     };
 
+    let inviteRewardMeta: { inviterUid?: string; inviterUsername?: string; invitedEmail?: string; rewarded?: boolean } | null = null;
     try {
-      await runTransaction(db, async (tx) => {
+      inviteRewardMeta = await runTransaction(db, async (tx) => {
         const indexRef = doc(db, 'usernameIndex', normalized);
+        const userRef = doc(db, 'users', userCredential.user.uid);
+        const emailLower = email.trim().toLowerCase();
+        const inviteRef = doc(db, 'emailInvites', emailLower);
+
+        // Read phase: Firestore transactions require all reads to complete before writes.
         const indexSnap = await tx.get(indexRef);
         if (indexSnap.exists()) {
           throw new Error('Username already taken');
         }
 
-        const userRef = doc(db, 'users', userCredential.user.uid);
+        const inviteSnap = await tx.get(inviteRef);
+        let inviteData: any = null;
+        let inviterRef: ReturnType<typeof doc> | null = null;
+        let inviterExists = false;
+        if (inviteSnap.exists()) {
+          const data = inviteSnap.data() as any;
+          if (data?.status === 'pending' && data?.inviterUid && data.inviterUid !== userCredential.user.uid) {
+            inviterRef = doc(db, 'users', data.inviterUid);
+            const inviterSnap = await tx.get(inviterRef);
+            if (inviterSnap.exists()) {
+              inviterExists = true;
+              inviteData = data;
+            }
+          }
+        }
+
+        // Write phase.
         tx.set(userRef, userDoc);
         tx.set(indexRef, { uid: userCredential.user.uid, createdAt: serverTimestamp() });
+
+        if (inviterExists && inviterRef && inviteData) {
+          const rewardAmount = 5.00;
+          tx.update(inviterRef, {
+            credits: increment(rewardAmount),
+          });
+          tx.update(inviteRef, {
+            status: 'registered',
+            registeredUserId: userCredential.user.uid,
+            registeredAt: serverTimestamp(),
+            rewardCredits: rewardAmount,
+            updatedAt: serverTimestamp(),
+          });
+
+          const rewardTxRef = doc(collection(db, 'transactions'));
+          tx.set(rewardTxRef, {
+            from: 'system',
+            to: inviteData.inviterUid,
+            participants: [inviteData.inviterUid],
+            amount: rewardAmount,
+            type: 'invite_bonus',
+            description: `Invite reward for ${emailLower}`,
+            timestamp: serverTimestamp(),
+          });
+          return {
+            inviterUid: inviteData.inviterUid,
+            inviterUsername: inviteData.inviterUsername || '',
+            invitedEmail: emailLower,
+            rewarded: true,
+          };
+        }
+
+        return { rewarded: false };
       });
     } catch (e: any) {
       // Roll back by deleting the newly created auth user
       try { await userCredential.user.delete(); } catch (err) { /* ignore */ }
       throw e;
+    }
+
+    if (inviteRewardMeta?.rewarded && inviteRewardMeta.inviterUid) {
+      let lotteryCode = '';
+      try {
+        const { recordInviteRegistrationForActiveContest } = await import('@/lib/giftContest');
+        const contestRes = await recordInviteRegistrationForActiveContest(
+          inviteRewardMeta.inviterUid,
+          inviteRewardMeta.inviterUsername || '',
+          inviteRewardMeta.invitedEmail || email.trim().toLowerCase(),
+          userCredential.user.uid
+        );
+        lotteryCode = contestRes.lotteryCode || '';
+      } catch (e) {
+        console.warn('Failed to record invite contest registration:', e);
+      }
+
+      try {
+        const codeText = lotteryCode ? ` Lottery code: ${lotteryCode}` : '';
+        await createUserAlert(
+          inviteRewardMeta.inviterUid,
+          'daily_credits',
+          `You earned 5.00 credits from a successful Bimo33 invitation.${codeText}`
+        );
+      } catch (e) {
+        console.warn('Failed to create invite reward alert:', e);
+      }
     }
 
     // Sign out after registration - user must verify email first
@@ -618,7 +764,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await updateDoc(doc(db, 'users', user.uid), {
       statusMessage: status
     });
-    await refreshProfile();
   };
 
   // allow manually setting presence from the UI
@@ -636,9 +781,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isOnline,
       presence
     });
-    // clear any cached copy so refreshProfile pulls fresh data
+    // Clear cache and let the existing profile onSnapshot propagate the update.
     invalidateUserCache(user.uid);
-    await refreshProfile();
   };
 
   const updateAvatarItems = async (items: UserProfile['avatarItems']) => {

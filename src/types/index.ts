@@ -74,7 +74,7 @@ export interface PrivateMessage {
 export interface GameSession {
   id: string;
   roomId: string;
-  type: 'lowcard' | 'dice' | 'luckynumber';
+  type: 'lowcard' | 'dice' | 'bimo' | 'luckynumber' | 'higherlower';
   status: 'waiting' | 'playing' | 'finished';
   players: string[];
   wager: number;

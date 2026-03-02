@@ -185,12 +185,12 @@ export async function redeemCode(
   };
 }
 
-// Check if it's time to generate a new code (every 5 minutes)
+// Check if it's time to generate a new code (every 10 minutes)
 // Uses Firestore transaction to prevent duplicate codes when multiple clients call simultaneously
 // This function only generates codes based on timing - independent of user presence
 export async function checkAndGenerateCode(roomId: string): Promise<RedeemCode | null> {
   const now = Date.now();
-  const fiveMinutes = 10 * 60 * 1000; // 5 minute interval
+  const tenMinutes = 10 * 60 * 1000; // 10 minute interval
 
   // Use a transaction to atomically check and update the last generation time
   // This prevents race conditions when multiple clients call this simultaneously
@@ -203,7 +203,7 @@ export async function checkAndGenerateCode(roomId: string): Promise<RedeemCode |
       const lastGen = lastGenDoc.exists() ? (lastGenDoc.data().lastGenerated || 0) : 0;
       
       // Check if enough time has passed since last generation
-      if (now - lastGen < fiveMinutes) {
+      if (now - lastGen < tenMinutes) {
         return null; // Not time yet, abort transaction
       }
       

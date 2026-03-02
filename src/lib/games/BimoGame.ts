@@ -1,11 +1,11 @@
 import { ref, get, set, update, remove, runTransaction } from 'firebase/database';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { rtdb, db } from '../firebase';
-import { updateCredits, getUserById, incrementGamesPlayedWeekly, addXP, txParticipants } from '../firebaseOperations';
+import { updateCredits, getUserById, incrementGamesPlayedWeekly, addXP, txParticipants, incrementMiniGameWins, triggerCompanionEvent } from '../firebaseOperations';
 import { formatWithCommas } from '../utils';
 import { GameHandler, BotMessage, GameSession, GamePlayer } from './types';
 
-const SUITS = ['hearts', 'diamonds', 'clubs', 'spades', 'flag', 'king'];
+const SUITS = ['hearts', 'diamonds', 'clubs', 'spades'];
 
 export function suitIcon(s: string) {
   switch (s) {
@@ -13,15 +13,13 @@ export function suitIcon(s: string) {
     case 'diamonds': return '♦️';
     case 'clubs': return '♣️';
     case 'spades': return '♠️';
-    case 'flag': return '🏳️';
-    case 'king': return '👑';
     default: return s;
   }
 }
 
 // multiplier helper useful for tests and centralizing logic
 export function payoutMultiplier(count: number): number {
-  // apply adjusted multiplier (90% of raw count): 2=>1.8x, 3=>2.7x, etc
+  // conservative multiplier to reduce long-run inflation
   return count * 0.9;
 }
 
@@ -53,10 +51,6 @@ export function composeWinnerAnnouncement(username: string, total: number, lines
   return `🎉 ${username} wins ${formatWithCommas(total)} USD! ${detailText}`;
 }
 
-export function composeWinnerPrivate(username: string, total: number, lines: string[]): string {
-  const detailText = lines.join(', ');
-  return `🎉 Congratulations ${username}! You won ${formatWithCommas(total)} credits! ${detailText}`;
-}
 
 // build the public game message when a bet is placed/added
 export function buildBetMessage(
@@ -82,12 +76,19 @@ export class BimoGame implements GameHandler {
   private timers: Map<string, NodeJS.Timeout> = new Map();
   // track bet totals per room+user+suit to avoid DB race issues
   private betTotals: Map<string, number> = new Map();
+  // track pending suits locally to block rapid UI clicks
+  private pendingSuits: Map<string, Set<string>> = new Map();
 
-  // remove any stored totals for a given room (called when a game resets)
+  // remove any stored totals or pending data for a given room (called when a game resets)
   private clearRoomTotals(roomId: string) {
     for (const key of Array.from(this.betTotals.keys())) {
       if (key.startsWith(`${roomId}:`)) {
         this.betTotals.delete(key);
+      }
+    }
+    for (const key of Array.from(this.pendingSuits.keys())) {
+      if (key.startsWith(`${roomId}:`)) {
+        this.pendingSuits.delete(key);
       }
     }
   }
@@ -173,7 +174,7 @@ export class BimoGame implements GameHandler {
 
     this.scheduleJoinPhaseEnd(roomId);
 
-    return [{ content: `🃏 ${senderName} started Bimo! Place suit bets using !b <suit> <amount>. You may bet on any number of suits. Betting open for 30s.`, type: 'game' as const }];
+    return [{ content: `🃏 ${senderName} started Bimo! Place suit bets using !b <suit> <amount>. You may bet on up to two different suits per round (repeat bets allowed). Betting open for 30s.`, type: 'game' as const }];
   }
 
   private async handleBet(args: string[], senderId: string, senderName: string, roomId: string, currentGame: GameSession | null): Promise<BotMessage[]> {
@@ -195,45 +196,57 @@ export class BimoGame implements GameHandler {
     }
 
     // map common short forms for suit
-    const suitMap: Record<string, string> = { h: 'hearts', d: 'diamonds', c: 'clubs', s: 'spades', f: 'flag', k: 'king' };
+    const suitMap: Record<string, string> = { h: 'hearts', d: 'diamonds', c: 'clubs', s: 'spades' };
     const suit = SUITS.includes(suitRaw) ? suitRaw : suitMap[suitRaw];
     if (!suit) {
-      return [{ content: 'Invalid suit. Valid suits: hearts, diamonds, clubs, spades, flag, king.', type: 'private' as const, targetUserId: senderId }];
+      return [{ content: 'Invalid suit. Valid suits: hearts, diamonds, clubs, spades.', type: 'private' as const, targetUserId: senderId }];
     }
 
+    // enforce client-side suit limit using pendingSuits to keep up with fast UI clicks
+    const pendingKey = `${roomId}:${senderId}`;
+    let pending = this.pendingSuits.get(pendingKey);
+    if (!pending) {
+      pending = new Set<string>();
+      this.pendingSuits.set(pendingKey, pending);
+    }
+    const isNewSuitLocal = !pending.has(suit);
+    if (isNewSuitLocal && pending.size >= 2) {
+      return [{ content: 'You may only bet on up to two different suits per round. Add to an existing suit or wait for next round.', type: 'private' as const, targetUserId: senderId }];
+    }
+
+    // reserve the suit locally immediately so concurrent calls see it
+    if (isNewSuitLocal) pending.add(suit);
+
+    // now check credits
     const user = await getUserById(senderId);
     if (!user || user.credits < amount) {
+      // remove reservation if credit check fails
+      if (isNewSuitLocal) pending.delete(suit);
       return [{ content: 'Insufficient credits to place that bet.', type: 'private' as const, targetUserId: senderId }];
     }
 
-    // Deduct credits immediately
-    await updateCredits(senderId, -amount);
-    await addDoc(collection(db, 'transactions'), {
-      from: senderId,
-      fromUsername: senderName,
-      to: 'game',
-      participants: txParticipants(senderId, 'game'),
-      amount,
-      type: 'game_bet',
-      description: `Bimo bet on ${suit}`,
-      timestamp: serverTimestamp()
-    });
-
-    // use transaction on players array to avoid missing concurrent bets
+    // run transaction to update player's bets and enforce two-suit limit atomically
     const playersRef = ref(rtdb, `games/${roomId}/bimo/players`);
+    const beforeSnap = await get(playersRef);
+    const existedBefore = ((beforeSnap.val() as GamePlayer[] | null) || []).some(p => p.userId === senderId);
     let totalForSuit = 0;
     let wasExisting = false;
-
-    await runTransaction(playersRef, (current) => {
+    const result = await runTransaction(playersRef, (current) => {
       const arr: GamePlayer[] = (current as any) || [];
       let player = arr.find(p => p.userId === senderId);
       if (!player) {
         player = { userId: senderId, username: senderName, isActive: true, hasDrawn: false, joinedAt: Date.now(), bets: [] } as GamePlayer;
         arr.push(player);
-        try { incrementGamesPlayedWeekly(senderId); } catch (e) { console.error('Failed to increment gamesPlayedWeekly for Bimo player join', e); }
       }
 
       player.bets = player.bets || [];
+      // enforce suit limit inside transaction
+      const suitsSet = new Set(player.bets.map(b => b.suit));
+      if (!suitsSet.has(suit)) suitsSet.add(suit);
+      if (suitsSet.size > 2) {
+        return; // abort transaction
+      }
+
       const existing = player.bets.find(b => b.suit === suit);
       if (existing) {
         existing.amount += amount;
@@ -245,6 +258,65 @@ export class BimoGame implements GameHandler {
         .filter(b => b.suit === suit)
         .reduce((s, b) => s + b.amount, 0);
       return arr as any;
+    });
+
+    if (!result.committed) {
+      // transaction aborted due to suit limit
+      // undo local reservation
+      const pending = this.pendingSuits.get(`${roomId}:${senderId}`);
+      if (pending) pending.delete(suit);
+      return [{ content: 'You may only bet on up to two different suits per round. Add to an existing suit or wait for next round.', type: 'private' as const, targetUserId: senderId }];
+    }
+
+    // Keep side-effects out of RTDB transaction callback to avoid duplicate execution on retries.
+    if (!existedBefore) {
+      try {
+        await incrementGamesPlayedWeekly(senderId);
+      } catch (e) {
+        console.error('Failed to increment gamesPlayedWeekly for Bimo player join', e);
+      }
+    }
+
+    // verify final state just in case a race slipped through
+    const finalSnap = await get(playersRef);
+    const finalArr: GamePlayer[] = (finalSnap.val() as any) || [];
+    const finalPlayer = finalArr.find(p => p.userId === senderId);
+    const finalSuits = new Set(finalPlayer?.bets?.map(b => b.suit));
+    if (finalSuits.size > 2) {
+      // rollback this bet: subtract amount or remove suit entry
+      await runTransaction(playersRef, (current) => {
+        const arr: GamePlayer[] = (current as any) || [];
+        const pl = arr.find(p => p.userId === senderId);
+        if (pl && pl.bets) {
+          const bet = pl.bets.find((b: any) => b.suit === suit);
+          if (bet) {
+            if (bet.amount > amount) {
+              bet.amount -= amount;
+            } else {
+              pl.bets = pl.bets.filter((b: any) => b.suit !== suit);
+            }
+          }
+        }
+        return arr as any;
+      });
+      // undo pending reservation
+      const pending = this.pendingSuits.get(`${roomId}:${senderId}`);
+      if (pending) pending.delete(suit);
+      // no credits deducted yet, so nothing to refund
+      return [{ content: 'You may only bet on up to two different suits per round. Add to an existing suit or wait for next round.', type: 'private' as const, targetUserId: senderId }];
+    }
+
+    // at this point transaction succeeded and limit still holds - deduct credits and log
+    await updateCredits(senderId, -amount);
+    await addDoc(collection(db, 'transactions'), {
+      from: senderId,
+      fromUsername: senderName,
+      to: 'game',
+      participants: txParticipants(senderId, 'game'),
+      amount,
+      type: 'game_bet',
+      description: `Bimo bet on ${suit}`,
+      timestamp: serverTimestamp()
     });
 
     // update internal running total for messaging
@@ -259,9 +331,7 @@ export class BimoGame implements GameHandler {
     hearts: '♥️',
     diamonds: '♦️',
     clubs: '♣️',
-    spades: '♠️',
-    flag: '🏳️',
-    king: '👑'
+    spades: '♠️'
     };
 
     const suitIcon = suitIcons[suit];
@@ -301,7 +371,7 @@ export class BimoGame implements GameHandler {
     }
 
     // Count frequencies (include new suits)
-    const freq: Record<string, number> = { hearts: 0, diamonds: 0, clubs: 0, spades: 0, flag: 0, king: 0 };
+    const freq: Record<string, number> = { hearts: 0, diamonds: 0, clubs: 0, spades: 0 };
     for (const d of draws) freq[d] = (freq[d] || 0) + 1;
 
     // Update game to playing and store draws
@@ -369,6 +439,12 @@ export class BimoGame implements GameHandler {
 
     if (winners.length === 0) {
       await this.sendBotMessage(roomId, '🃏 No winners this round.', 'game');
+      try {
+        const losers = (game.players || []).map((p) => p.userId);
+        await Promise.all(losers.map((uid) => triggerCompanionEvent(uid, 'mini_game_loss', { roomId })));
+      } catch (e) {
+        console.warn('Failed to trigger companion mini_game_loss events (bimo no winners):', e);
+      }
     } else {
       // Announce winners grouped by user
       const byUser: Record<string, { username: string; total: number; lines: string[] }> = {};
@@ -387,9 +463,18 @@ export class BimoGame implements GameHandler {
         const detailText = info.lines.join(', ');
         await this.sendBotMessage(roomId, composeWinnerAnnouncement(info.username, info.total, info.lines), 'game');
         // Private notification for each winner
-        await this.sendBotMessage(roomId, composeWinnerPrivate(info.username, info.total, info.lines), 'private', uid);
         // Award winner XP (once per winning user per round)
         try { await addXP(uid, 20); } catch (e) { console.warn('Failed to award winner XP to Bimo winner:', e); }
+        try { await incrementMiniGameWins(uid); } catch (e) { console.warn('Failed to track mini-game win (bimo):', e); }
+        try { await triggerCompanionEvent(uid, 'mini_game_win', { roomId }); } catch (e) { console.warn('Failed to trigger companion mini_game_win (bimo):', e); }
+        try { await triggerCompanionEvent(uid, 'high_amount_game_win', { roomId, amount: info.total }); } catch (e) { console.warn('Failed to trigger companion high_amount_game_win (bimo):', e); }
+      }
+      try {
+        const winnerIdSet = new Set(Object.keys(byUser));
+        const losers = (game.players || []).filter((p) => !winnerIdSet.has(p.userId));
+        await Promise.all(losers.map((p) => triggerCompanionEvent(p.userId, 'mini_game_loss', { roomId })));
+      } catch (e) {
+        console.warn('Failed to trigger companion mini_game_loss events (bimo):', e);
       }
       // Very rare bumper win: single roll controlling all winners (configurable via `bumperChancePct`)
       try {
@@ -414,9 +499,8 @@ export class BimoGame implements GameHandler {
               });
 
               bumperLines.push(`${info.username} +${formatWithCommas(extra)}`);
-              // Announce per-winner bumper privately and publicly
+              // Announce bumper publicly
               await this.sendBotMessage(roomId, `🚀 BUMPER! ${info.username} receives an extra ${formatWithCommas(extra)} credits!`, 'game');
-              await this.sendBotMessage(roomId, `🚀 BUMPER! ${info.username}, you received an extra ${formatWithCommas(extra)} credits!`, 'private', uid);
             }
           }
 

@@ -1,8 +1,8 @@
-// Dice Game - Separate game logic
+﻿// Dice Game - Separate game logic
 import { ref, get, set, update, remove } from 'firebase/database';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
 import { rtdb, db } from '../firebase';
-import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly } from '../firebaseOperations';
+import { updateCredits, addXP, getUserById, incrementGamesPlayedWeekly, incrementMiniGameWins, triggerCompanionEvent } from '../firebaseOperations';
 import { formatWithCommas } from '../utils';
 import { GameHandler, BotMessage, GameSession, GamePlayer } from './types';
 
@@ -28,6 +28,8 @@ const TOTAL_EMOJI: Record<number, string> = {
   12: '1️⃣2️⃣',
 };
 
+const HOUSE_RAKE_RATE = 0.05;
+
 
 export class DiceGame implements GameHandler {
   readonly gameType = 'dice';
@@ -38,12 +40,12 @@ export class DiceGame implements GameHandler {
 
   getWelcomeMessage(): string {
     return (
-      `🎲 DiceBot has been added to the room !start <amount> to start the game!`
+      `ðŸŽ² DiceBot has been added to the room !start <amount> to start the game!`
     );
   }
 
   getRemovalMessage(): string {
-    return '🎲 DiceBot has been removed from the room.';
+    return 'ðŸŽ² DiceBot has been removed from the room.';
   }
 
   async isGameInProgress(roomId: string): Promise<boolean> {
@@ -351,7 +353,7 @@ export class DiceGame implements GameHandler {
       }
       await remove(gameRef);
 
-      await this.sendBotMessage(roomId, '❌ Not enough players joined. Game cancelled. Type !start to start a new game.', 'game');
+      await this.sendBotMessage(roomId, 'Not enough players joined. Game cancelled. Type !start to start a new game.', 'game');
       return;
     }
 
@@ -405,7 +407,7 @@ export class DiceGame implements GameHandler {
             ? { ...x, currentCard: { value: total, display }, hasDrawn: true }
             : x
         );
-        await this.sendBotMessage(roomId, ` 🤖 Auto-rolling: The bot has rolled ${display} for ${p.username}!`, 'game');
+        await this.sendBotMessage(roomId, ` Auto-rolling: The bot has rolled ${display} for ${p.username}!`, 'game');
       }
     }
 
@@ -427,7 +429,7 @@ export class DiceGame implements GameHandler {
 
     await this.sendBotMessage(
       roomId,
-      ` ❌ ${loser.username} is eliminated with ${loser.currentCard?.display}! players remaining in the game: ${remaining.length}`,
+      ` ${loser.username} is eliminated with ${loser.currentCard?.display}! players remaining in the game: ${remaining.length}`,
       'game'
     );
 
@@ -454,9 +456,19 @@ export class DiceGame implements GameHandler {
   private async endGame(roomId: string, winner: GamePlayer, game: GameSession) {
     const gameRef = ref(rtdb, `games/${roomId}/dice`);
     const totalPot = (game.betAmount || 0) * (game.players?.length || 0);
+    const winnerPayout = Number((totalPot * (1 - HOUSE_RAKE_RATE)).toFixed(2));
 
-    await updateCredits(winner.userId, totalPot);
+    await updateCredits(winner.userId, winnerPayout);
     try { await addXP(winner.userId, 20); } catch (e) { console.warn('Failed to award winner XP (dice):', e); }
+    try { await incrementMiniGameWins(winner.userId); } catch (e) { console.warn('Failed to track mini-game win (dice):', e); }
+    try { await triggerCompanionEvent(winner.userId, 'mini_game_win', { roomId }); } catch (e) { console.warn('Failed to trigger companion mini_game_win (dice):', e); }
+    try { await triggerCompanionEvent(winner.userId, 'high_amount_game_win', { roomId, amount: winnerPayout }); } catch (e) { console.warn('Failed to trigger companion high_amount_game_win (dice):', e); }
+    try {
+      const losers = (game.players || []).filter((p) => p.userId !== winner.userId);
+      await Promise.all(losers.map((p) => triggerCompanionEvent(p.userId, 'mini_game_loss', { roomId })));
+    } catch (e) {
+      console.warn('Failed to trigger companion mini_game_loss events (dice):', e);
+    }
 
     // Record winning transaction
     await addDoc(collection(db, 'transactions'), {
@@ -464,7 +476,7 @@ export class DiceGame implements GameHandler {
       to: winner.userId,
       participants: [winner.userId],
       toUsername: winner.username,
-      amount: totalPot,
+      amount: winnerPayout,
       type: 'game',
       description: 'Dice game winnings',
       timestamp: serverTimestamp()
@@ -479,17 +491,17 @@ export class DiceGame implements GameHandler {
 
     await this.sendBotMessage(
       roomId,
-      ` GAME OVER! 🎉 ${winner.username} WINS ${formatWithCommas(totalPot)} USD! CONGRATS!!! 🎊`,
+      ` GAME OVER! 🎉 ${winner.username} WINS ${formatWithCommas(winnerPayout)} USD! CONGRATS!!! 🎊`,
       'game'
     );
 
     // Private notification to the winner
-    await this.sendBotMessage(
-      roomId,
-      `🎉 Congrats ${winner.username}! You won ${formatWithCommas(totalPot)} credits!`,
-      'private',
-      winner.userId
-    );
+    // await this.sendBotMessage(
+    //   roomId,
+    //   `🎉 Congrats ${winner.username}! You won ${formatWithCommas(winnerPayout)} credits!`,
+    //   'private',
+    //   winner.userId
+    // );
 
     // Remove game after delay
     setTimeout(async () => {
@@ -523,3 +535,4 @@ export class DiceGame implements GameHandler {
 
 // Singleton instance
 export const diceGame = new DiceGame();
+

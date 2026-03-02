@@ -197,7 +197,7 @@ export default function PrivateMessagesPage() {
             />
             <div>
               <h1 className="font-semibold text-sm"><Username user={friend} /></h1>
-              <p className="text-xs text-muted-foreground">Level {friend.level}</p>
+              <p className="text-caption text-muted-foreground">Level {friend.level}</p>
             </div>
           </div>
         </header>
@@ -235,3 +235,4 @@ export default function PrivateMessagesPage() {
     </NewAppLayout>
   );
 }
+

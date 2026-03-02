@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Button } from '@/components/ui/button';
 import Username from '@/components/Username';
 import { CustomAvatar } from '@/components/CustomAvatar';
-import { getGiftsReceived, getGiftsSent, getUserById } from '@/lib/firebaseOperations';
+import { getGiftsReceived, getGiftsSent, getUsersByIds } from '@/lib/firebaseOperations';
 import { Transaction } from '@/lib/firebaseOperations';
 import { UserProfile } from '@/contexts/AuthContext';
 import { formatRelativeTime } from '@/lib/utils';
@@ -19,6 +19,7 @@ interface GiftListDialogProps {
 export default function GiftListDialog({ open, onOpenChange, userId, mode }: GiftListDialogProps) {
   const [loading, setLoading] = useState(false);
   const [gifts, setGifts] = useState<Transaction[]>([]);
+  const [counterparts, setCounterparts] = useState<Record<string, UserProfile | null>>({});
   const [lastTimestamp, setLastTimestamp] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(true);
 
@@ -28,10 +29,42 @@ export default function GiftListDialog({ open, onOpenChange, userId, mode }: Gif
       loadInitial();
     } else {
       setGifts([]);
+      setCounterparts({});
       setLastTimestamp(null);
       setHasMore(true);
     }
   }, [open, userId, mode]);
+
+  useEffect(() => {
+    const ids = Array.from(new Set(
+      gifts
+        .map((tx) => (mode === 'received' ? (tx.from === 'system' ? null : tx.from) : (tx.to === 'all' ? null : tx.to)))
+        .filter((id): id is string => !!id)
+    ));
+    const missing = ids.filter((id) => counterparts[id] === undefined);
+    if (missing.length === 0) return;
+
+    let mounted = true;
+    (async () => {
+      try {
+        const users = await getUsersByIds(missing);
+        const map: Record<string, UserProfile | null> = {};
+        missing.forEach((id) => { map[id] = null; });
+        users.forEach((u) => { map[u.uid] = u; });
+        if (mounted) setCounterparts((prev) => ({ ...prev, ...map }));
+      } catch {
+        if (mounted) {
+          const map: Record<string, UserProfile | null> = {};
+          missing.forEach((id) => { map[id] = null; });
+          setCounterparts((prev) => ({ ...prev, ...map }));
+        }
+      }
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [gifts, mode, counterparts]);
 
   const loadInitial = async () => {
     setLoading(true);
@@ -62,17 +95,6 @@ export default function GiftListDialog({ open, onOpenChange, userId, mode }: Gif
     }
   };
 
-  // Helper to fetch counterpart user (sender for received, recipient for sent)
-  const getCounterpart = async (tx: Transaction): Promise<UserProfile | null> => {
-    try {
-      const id = mode === 'received' ? (tx.from === 'system' ? null : tx.from) : (tx.to === 'all' ? null : tx.to);
-      if (!id) return null;
-      return await getUserById(id);
-    } catch (e) {
-      return null;
-    }
-  };
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="glass border-white/10 max-w-2xl">
@@ -82,15 +104,20 @@ export default function GiftListDialog({ open, onOpenChange, userId, mode }: Gif
 
         <div className="space-y-2 max-h-96 overflow-auto mt-2">
           {loading && gifts.length === 0 ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">
+            <div className="p-6 text-center text-body text-muted-foreground">
               <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
               Loading gifts...
             </div>
           ) : gifts.length === 0 ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">No gifts found</div>
+            <div className="p-6 text-center text-body text-muted-foreground">No gifts found</div>
           ) : (
             gifts.map((tx) => (
-              <GiftListItem key={tx.id} tx={tx} mode={mode} getCounterpart={getCounterpart} />
+              <GiftListItem
+                key={tx.id}
+                tx={tx}
+                mode={mode}
+                other={counterparts[mode === 'received' ? tx.from : tx.to] || null}
+              />
             ))
           )}
         </div>
@@ -101,7 +128,7 @@ export default function GiftListDialog({ open, onOpenChange, userId, mode }: Gif
               {loading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : 'Load more'}
             </Button>
           ) : (
-            <div className="text-sm text-muted-foreground">No more gifts</div>
+            <div className="text-body text-muted-foreground">No more gifts</div>
           )}
           <div className="flex-1" />
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
@@ -111,15 +138,7 @@ export default function GiftListDialog({ open, onOpenChange, userId, mode }: Gif
   );
 }
 
-function GiftListItem({ tx, mode, getCounterpart }: { tx: Transaction; mode: 'received' | 'sent'; getCounterpart: (tx: Transaction) => Promise<UserProfile | null> }) {
-  const [other, setOther] = useState<UserProfile | null>(null);
-
-  useEffect(() => {
-    let mounted = true;
-    getCounterpart(tx).then(u => { if (mounted) setOther(u); }).catch(() => { /* ignore */ });
-    return () => { mounted = false; };
-  }, [tx]);
-
+function GiftListItem({ tx, mode, other }: { tx: Transaction; mode: 'received' | 'sent'; other: UserProfile | null }) {
   // Display gift emoji + name (remove price display)
   const giftLabel = tx.giftName ? `${tx.giftEmoji || ''} ${tx.giftName}` : `${tx.giftEmoji || ''} Gift`;
 
@@ -137,9 +156,9 @@ function GiftListItem({ tx, mode, getCounterpart }: { tx: Transaction; mode: 're
               tx.to === 'all' ? `Shower to ${tx.recipientsCount || 'many'}` : (other ? <Username user={other} /> : 'Someone')
             )}
           </div>
-          <div className="text-xs text-muted-foreground">· {formatRelativeTime(tx.timestamp)}</div>
+          <div className="text-caption text-muted-foreground">· {formatRelativeTime(tx.timestamp)}</div>
         </div>
-        <div className="text-sm text-muted-foreground">{giftLabel}{tx.description ? ` • ${tx.description}` : ''}</div>
+        <div className="text-body text-muted-foreground">{giftLabel}{tx.description ? ` • ${tx.description}` : ''}</div>
       </div>
     </div>
   );

@@ -6,6 +6,7 @@ import { lowcardGame } from './LowcardGame';
 import { diceGame } from './DiceGame';
 import { bimoGame } from './BimoGame';
 import { luckyNumberGame } from './LuckyNumberGame';
+import { higherLowerGame } from './HigherLowerGame';
 
 const CONTROLLER_TTL_MS = 30 * 1000; // 30s controller claim TTL
 const INACTIVITY_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes inactivity timeout
@@ -16,6 +17,7 @@ const GAME_REGISTRY: Record<string, GameHandler> = {
   dice: diceGame,
   bimo: bimoGame,
   luckynumber: luckyNumberGame,
+  higherlower: higherLowerGame,
   // Add more games here
 };
 

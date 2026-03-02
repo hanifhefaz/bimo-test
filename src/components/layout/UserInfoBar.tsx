@@ -68,10 +68,10 @@ export function UserInfoBar() {
           {/* Right: Credits + Logout */}
           <div className="flex items-center gap-2">
             <motion.div
-              className="flex items-center gap-1 px-2 py-1 rounded-full bg-success/10 border border-success/30"
+              className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-primary/10 border border-primary/30"
               whileHover={{ scale: 1.02 }}
             >
-              <span className="text-xs font-semibold text-success">{formatWithCommas(userProfile.credits)} USD</span>
+              <span className="text-caption font-semibold text-primary">{formatWithCommas(userProfile.credits)} USD</span>
             </motion.div>
 
             {/* Theme picker (visible to everyone) */}

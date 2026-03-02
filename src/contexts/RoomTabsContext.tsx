@@ -5,7 +5,6 @@ import { UserProfile } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { ref, remove } from 'firebase/database';
 import { rtdb } from '@/lib/firebase';
-import { toast } from 'sonner';
 
 export interface RoomTab {
   id: string;
@@ -37,6 +36,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
   const [messagesCache, setMessagesCache] = useState<Record<string, ChatMessageType[]>>({});
   const subsRef = useRef<Record<string, () => void>>({});
   const joinTimesRef = useRef<Record<string, number>>({});
+  const latestMessageIdRef = useRef<Record<string, string | undefined>>({});
   const { userProfile } = useAuth();
   const activeTabRef = useRef<string>(activeTab);
   const isMountedRef = useRef<boolean>(true);
@@ -112,6 +112,13 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
           console.error('Failed to enrich room messages with roles:', e);
         }
 
+        const latestMessageId = filtered.length > 0 ? filtered[filtered.length - 1].id : undefined;
+        const previousLatestMessageId = latestMessageIdRef.current[roomId];
+        const hasNewIncomingMessage =
+          !!latestMessageId &&
+          !!previousLatestMessageId &&
+          latestMessageId !== previousLatestMessageId;
+
         // Update cache and detect new private messages for popups (game/gift)
         setMessagesCache(prev => {
           if (!isMountedRef.current) return prev;
@@ -122,15 +129,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
           for (const m of filtered) {
             const anyM = m as any;
             if (!prevIds.has(m.id) && anyM.targetUserId && userProfile && anyM.targetUserId === userProfile.uid) {
-              // Only show popup for game or gift private messages
-              if (m.type === 'game') {
-                toast.success(m.content || 'You won! 🎉');
-              } else if (m.type === 'gift') {
-                toast.success(m.content || 'You received a gift! 🎁');
-              } else {
-                // generic private notification
-                toast.success(m.content || 'New notification');
-              }
+              // Private notifications are rendered in chat history; avoid popup toasts.
             }
           }
 
@@ -138,14 +137,15 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
         });
 
         // Mark unread if not active — do not auto-clear unread when user switches back.
-        if (isMountedRef.current && activeTabRef.current !== roomId) {
+        latestMessageIdRef.current[roomId] = latestMessageId;
+        if (isMountedRef.current && hasNewIncomingMessage && activeTabRef.current !== roomId) {
           setOpenTabs(prev => prev.map(t => t.id === roomId ? { ...t, hasUnread: true } : t));
         }
       });
 
       subsRef.current[roomId] = unsubscribe;
     }
-  }, [activeTab, userProfile]);
+  }, [userProfile]);
 
   const closeRoomTab = useCallback(async (roomId: string, userId?: string, username?: string) => {
     // If user info is provided, leave the room
@@ -179,6 +179,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
       try { subsRef.current[roomId](); } catch (e) { /* ignore */ }
       delete subsRef.current[roomId];
     }
+    delete latestMessageIdRef.current[roomId];
     setMessagesCache(prev => {
       const copy = { ...prev };
       delete copy[roomId];
@@ -248,6 +249,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
       try { subsRef.current[roomId](); } catch (e) { /* ignore */ }
       delete subsRef.current[roomId];
     }
+    delete latestMessageIdRef.current[roomId];
     setMessagesCache(prev => {
       const copy = { ...prev };
       delete copy[roomId];
@@ -270,6 +272,7 @@ export function RoomTabsProvider({ children }: { children: ReactNode }) {
       setOpenTabs([]);
       setActiveTab('home');
       joinTimesRef.current = {};
+      latestMessageIdRef.current = {};
 
       // Navigate to home page
       try {

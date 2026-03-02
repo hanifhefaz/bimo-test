@@ -5,3 +5,4 @@ export { lowcardGame } from './LowcardGame';
 export { diceGame } from './DiceGame';
 export { bimoGame } from './BimoGame';
 export { luckyNumberGame } from './LuckyNumberGame';
+export { higherLowerGame } from './HigherLowerGame';

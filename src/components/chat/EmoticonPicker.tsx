@@ -70,7 +70,7 @@ export function EmoticonPicker({ ownedPacks, onSelectEmoticon }: EmoticonPickerP
           {/* Emoticons grid */}
           {currentPack && (
             <div>
-              <p className="text-xs text-muted-foreground mb-2">{currentPack.name}</p>
+              <p className="text-caption text-muted-foreground mb-2">{currentPack.name}</p>
               <ScrollArea className="h-32">
                 <div className="grid grid-cols-5 gap-1">
                   {currentPack.emoticons.map((emoticon, index) => (
@@ -88,7 +88,7 @@ export function EmoticonPicker({ ownedPacks, onSelectEmoticon }: EmoticonPickerP
             </div>
           )}
 
-          <p className="text-xs text-muted-foreground pt-2 border-t border-white/10 text-center">
+          <p className="text-caption text-muted-foreground pt-2 border-t border-white/10 text-center">
             Buy more packs in the Store!
           </p>
         </div>
@@ -96,3 +96,4 @@ export function EmoticonPicker({ ownedPacks, onSelectEmoticon }: EmoticonPickerP
     </Popover>
   );
 }
+

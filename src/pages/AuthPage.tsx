@@ -87,7 +87,7 @@ export const AuthPage = () => {
               <div className="w-10 h-10 rounded-lg glass flex items-center justify-center">
                 <feature.icon className="w-5 h-5 text-primary" />
               </div>
-              <span className="text-xs text-muted-foreground">{feature.text}</span>
+              <span className="text-caption text-muted-foreground">{feature.text}</span>
             </motion.div>
           ))}
         </div>
@@ -174,7 +174,7 @@ export const AuthPage = () => {
               <button
                 type="button"
                 onClick={() => setIsLogin(!isLogin)}
-                className="text-sm text-muted-foreground hover:text-primary transition-colors"
+                className="text-body text-muted-foreground hover:text-primary transition-colors"
               >
                 {isLogin
                   ? "Don't have an account? Sign up"
@@ -184,10 +184,11 @@ export const AuthPage = () => {
           </CardContent>
         </Card>
 
-        <p className="text-center text-xs text-muted-foreground mt-6">
+        <p className="text-center text-caption text-muted-foreground mt-6">
           Powered by Firebase 🔥
         </p>
       </motion.div>
     </div>
   );
 };
+

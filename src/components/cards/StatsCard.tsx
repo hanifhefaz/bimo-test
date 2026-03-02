@@ -58,7 +58,7 @@ export function StatsCard({ icon: Icon, label, value, gradient = 'primary', dela
           <Icon className="w-5 h-5" />
         </div>
         <div>
-          <p className="text-xs text-muted-foreground">{label}</p>
+          <p className="text-caption text-muted-foreground">{label}</p>
           <p className="text-lg font-bold">{(() => {
             const isNumeric = typeof value === 'number' || (!isNaN(Number(value as any)) && value !== '');
             return isNumeric ? formatShortNumber(Number(value as any)) : String(value);
@@ -68,3 +68,4 @@ export function StatsCard({ icon: Icon, label, value, gradient = 'primary', dela
     </motion.div>
   );
 }
+

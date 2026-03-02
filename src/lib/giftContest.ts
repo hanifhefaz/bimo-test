@@ -12,18 +12,37 @@ import {
   limit,
   serverTimestamp,
   increment,
-  runTransaction
+  runTransaction,
+  addDoc,
+  arrayUnion
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { updateCredits, createUserAlert } from './firebaseOperations';
+import { updateCredits, createUserAlert, STORE_ITEMS } from './firebaseOperations';
 
 // generic contest interface - extensions can add more fields as needed
+export type ContestType = 'gift' | 'invite';
+
+export interface InviteContestStat {
+  username: string;
+  successfulInvites: number;
+  lotteryCodes: string[];
+}
+
+export interface InviteLotteryEntry {
+  code: string;
+  inviterUid: string;
+  inviterUsername: string;
+  invitedEmail: string;
+  registeredUserId: string;
+  createdAt: number;
+}
+
 export interface GiftShowerContest {
   id: string;
   /**
-   * type of contest, currently only "gift" but this allows future expansion
+   * type of contest
    */
-  type?: 'gift';
+  type?: ContestType;
   roomId: string;
   roomName: string;
   startTime: number;
@@ -34,10 +53,50 @@ export interface GiftShowerContest {
    * id of the gift that counts toward the contest. if omitted any gift is eligible.
    */
   giftId?: string;
-  giftStats: { [userId: string]: { username: string; totalGifts: number; totalValue: number } };
+  giftStats?: { [userId: string]: { username: string; totalGifts: number; totalValue: number } };
+  inviteStats?: { [userId: string]: InviteContestStat };
+  lotteryEntries?: { [code: string]: InviteLotteryEntry };
+  fixedTopPrizes?: number[];
+  grandPrizeCredits?: number;
+  grandPrizeWinnerId?: string;
+  grandPrizeWinnerName?: string;
+  grandPrizeLotteryCode?: string;
+  grandPrizePetId?: string;
+  endedAt?: number;
   winnerId?: string;
   winnerName?: string;
   lastContestDate?: string; // YYYY-MM-DD format to track daily limit
+  topPrizeWinners?: { userId: string; username: string; successfulInvites: number; prize: number }[];
+}
+
+export const INVITE_CONTEST_DURATION_DAYS = 5;
+export const INVITE_TOP_PRIZES = [150, 100, 75, 50, 30]; // top 5 fixed prizes for invite contest
+export const INVITE_GRAND_PRIZE_CREDITS = 100;
+
+function getTopPetId(): string | undefined {
+  const topPet = STORE_ITEMS
+    .filter(item => item.type === 'pet')
+    .sort((a, b) => b.price - a.price)[0];
+  return topPet?.id;
+}
+
+function getPetPriceById(petId: string): number {
+  const pet = STORE_ITEMS.find(item => item.type === 'pet' && item.id === petId);
+  return pet?.price || 0;
+}
+
+function randomCode(length: number = 8): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < length; i += 1) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+function generateLotteryCode(contestId: string): string {
+  const suffix = contestId.slice(-4).toUpperCase();
+  return `BIMO-${suffix}-${randomCode(6)}`;
 }
 
 // Check if there's an active contest in a room
@@ -81,7 +140,7 @@ export async function startGiftShowerContest(
   roomId: string,
   roomName: string,
   durationMinutes: number = 60,
-  prizeCredits: number = 1000,
+  prizeCredits: number = 50,
   giftId?: string,
   skipDailyCheck: boolean = false
 ): Promise<{ contest?: GiftShowerContest; error?: string }> {
@@ -126,6 +185,38 @@ export async function startGiftShowerContest(
   const metaRef = doc(db, 'contestMeta', roomId);
   await setDoc(metaRef, { lastContestDate: today });
 
+  return { contest: { id: contestId, ...contest } };
+}
+
+// Start a global invite contest (admin command entry-point).
+export async function startInviteContest(
+  durationDays: number = INVITE_CONTEST_DURATION_DAYS
+): Promise<{ contest?: GiftShowerContest; error?: string }> {
+  const contestsRef = collection(db, 'giftContests');
+  const existingQ = query(contestsRef, where('type', '==', 'invite'), where('isActive', '==', true), limit(1));
+  const existingSnap = await getDocs(existingQ);
+  if (!existingSnap.empty) {
+    return { error: 'An invite contest is already active.' };
+  }
+
+  const now = Date.now();
+  const contestId = `invite_contest_${now}`;
+  const contest: Omit<GiftShowerContest, 'id'> = {
+    type: 'invite',
+    roomId: 'global',
+    roomName: 'Bimo33',
+    startTime: now,
+    endTime: now + durationDays * 24 * 60 * 60 * 1000,
+    isActive: true,
+    prizeCredits: INVITE_TOP_PRIZES.reduce((sum, v) => sum + v, 0) + INVITE_GRAND_PRIZE_CREDITS,
+    inviteStats: {},
+    lotteryEntries: {},
+    fixedTopPrizes: INVITE_TOP_PRIZES,
+    grandPrizeCredits: INVITE_GRAND_PRIZE_CREDITS,
+    grandPrizePetId: getTopPetId(),
+  };
+
+  await setDoc(doc(db, 'giftContests', contestId), contest);
   return { contest: { id: contestId, ...contest } };
 }
 
@@ -185,10 +276,66 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
     if (!contest.isActive) return null;
 
     // Mark as ended FIRST in the transaction to prevent race conditions
-    tx.update(contestRef, { isActive: false });
+    tx.update(contestRef, { isActive: false, endedAt: Date.now() });
+
+    if (contest.type === 'invite') {
+      const inviteStats = contest.inviteStats || {};
+      const entries = Object.entries(inviteStats);
+      const sorted = entries.sort((a, b) => b[1].successfulInvites - a[1].successfulInvites);
+      const topParticipants = sorted.slice(0, 5);
+      const fixedPrizes = contest.fixedTopPrizes?.length ? contest.fixedTopPrizes : INVITE_TOP_PRIZES;
+      const prizeDistribution = topParticipants.map(([userId, data], idx) => ({
+        userId,
+        username: data.username,
+        successfulInvites: data.successfulInvites,
+        prize: fixedPrizes[idx] || 0,
+      })).filter(p => p.prize > 0);
+
+      const lotteryEntries = contest.lotteryEntries || {};
+      const lotteryCodes = Object.keys(lotteryEntries);
+      let grandPrizeWinnerId: string | undefined;
+      let grandPrizeWinnerName: string | undefined;
+      let grandPrizeLotteryCode: string | undefined;
+      if (lotteryCodes.length > 0) {
+        const selectedCode = lotteryCodes[Math.floor(Math.random() * lotteryCodes.length)];
+        const selectedEntry = lotteryEntries[selectedCode];
+        if (selectedEntry) {
+          grandPrizeWinnerId = selectedEntry.inviterUid;
+          grandPrizeWinnerName = selectedEntry.inviterUsername;
+          grandPrizeLotteryCode = selectedCode;
+        }
+      }
+
+      const winnerId = prizeDistribution[0]?.userId || grandPrizeWinnerId || '';
+      const winnerName = prizeDistribution[0]?.username || grandPrizeWinnerName || '';
+      tx.update(contestRef, {
+        winnerId,
+        winnerName,
+        topPrizeWinners: prizeDistribution,
+        grandPrizeWinnerId: grandPrizeWinnerId || null,
+        grandPrizeWinnerName: grandPrizeWinnerName || null,
+        grandPrizeLotteryCode: grandPrizeLotteryCode || null,
+        grandPrizeCredits: contest.grandPrizeCredits || INVITE_GRAND_PRIZE_CREDITS,
+      });
+
+      return {
+        type: 'invite',
+        roomId: contest.roomId,
+        roomName: contest.roomName,
+        prize: contest.prizeCredits,
+        prizeDistribution,
+        grandPrizeWinnerId,
+        grandPrizeWinnerName,
+        grandPrizeLotteryCode,
+        grandPrizeCredits: contest.grandPrizeCredits || INVITE_GRAND_PRIZE_CREDITS,
+        grandPrizePetId: contest.grandPrizePetId || getTopPetId(),
+        winnerId,
+        winnerName,
+      };
+    }
 
     // Get participants
-    const entries = Object.entries(contest.giftStats);
+    const entries = Object.entries(contest.giftStats || {});
     if (entries.length === 0) {
       return { noParticipants: true, roomId: contest.roomId, roomName: contest.roomName };
     }
@@ -231,6 +378,7 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
     });
 
     return {
+      type: 'gift',
       winnerId,
       winnerName: winnerData.username,
       prize: contest.prizeCredits,
@@ -243,6 +391,101 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
 
   if (!result) return null;
 
+  if ((result as any).type === 'invite') {
+    const inviteResult: any = result;
+    for (const [index, winner] of inviteResult.prizeDistribution.entries()) {
+      await updateCredits(winner.userId, winner.prize);
+      try {
+        await createUserAlert(
+          winner.userId,
+          'contest_win',
+          `🎉 You placed ${index + 1} in the invite contest and earned ${winner.prize} credits!`
+        );
+      } catch (e) {
+        console.warn('Failed to alert invite contest winner', winner.userId, e);
+      }
+      await addDoc(collection(db, 'transactions'), {
+        from: 'system',
+        to: winner.userId,
+        participants: [winner.userId],
+        toUsername: winner.username,
+        amount: winner.prize,
+        type: 'contest',
+        description: `Invite contest rank ${index + 1} prize`,
+        timestamp: serverTimestamp()
+      });
+    }
+
+    if (inviteResult.grandPrizeWinnerId) {
+      await updateCredits(inviteResult.grandPrizeWinnerId, inviteResult.grandPrizeCredits);
+      let grandPrizeExtraText = '';
+      if (inviteResult.grandPrizePetId) {
+        const grandWinnerRef = doc(db, 'users', inviteResult.grandPrizeWinnerId);
+        const winnerSnap = await getDoc(grandWinnerRef);
+        const winnerPets = winnerSnap.exists() ? (winnerSnap.data().pets || []) : [];
+        const alreadyOwnsTopPet = Array.isArray(winnerPets) && winnerPets.includes(inviteResult.grandPrizePetId);
+        if (alreadyOwnsTopPet) {
+          const halfPetPrice = Number((getPetPriceById(inviteResult.grandPrizePetId) / 2).toFixed(2));
+          if (halfPetPrice > 0) {
+            await updateCredits(inviteResult.grandPrizeWinnerId, halfPetPrice);
+            await addDoc(collection(db, 'transactions'), {
+              from: 'system',
+              to: inviteResult.grandPrizeWinnerId,
+              participants: [inviteResult.grandPrizeWinnerId],
+              toUsername: inviteResult.grandPrizeWinnerName,
+              amount: halfPetPrice,
+              type: 'contest',
+              description: `Invite contest top-pet duplicate compensation (${inviteResult.grandPrizePetId})`,
+              timestamp: serverTimestamp()
+            });
+            grandPrizeExtraText = ` You already had the top pet, so you also received ${halfPetPrice} credits (half pet price).`;
+          }
+        } else {
+          await updateDoc(grandWinnerRef, {
+            pets: arrayUnion(inviteResult.grandPrizePetId)
+          });
+        }
+      }
+      try {
+        await createUserAlert(
+          inviteResult.grandPrizeWinnerId,
+          'contest_win',
+          `🎁 Grand prize winner! You won ${inviteResult.grandPrizeCredits} credits + top pet with lottery code ${inviteResult.grandPrizeLotteryCode}.`
+        );
+      } catch (e) {
+        console.warn('Failed to alert invite grand winner', e);
+      }
+      if (grandPrizeExtraText) {
+        try {
+          await createUserAlert(
+            inviteResult.grandPrizeWinnerId,
+            'contest_win',
+            grandPrizeExtraText.trim()
+          );
+        } catch (e) {
+          console.warn('Failed to alert invite grand winner compensation', e);
+        }
+      }
+      await addDoc(collection(db, 'transactions'), {
+        from: 'system',
+        to: inviteResult.grandPrizeWinnerId,
+        participants: [inviteResult.grandPrizeWinnerId],
+        toUsername: inviteResult.grandPrizeWinnerName,
+        amount: inviteResult.grandPrizeCredits,
+        type: 'contest',
+        description: `Invite contest grand prize (code ${inviteResult.grandPrizeLotteryCode})`,
+        timestamp: serverTimestamp()
+      });
+    }
+
+    return {
+      winnerId: inviteResult.winnerId,
+      winnerName: inviteResult.winnerName,
+      prize: inviteResult.prize,
+      roomId: inviteResult.roomId
+    };
+  }
+
   // Handle no participants case
   if ('noParticipants' in result && result.noParticipants) {
     try {
@@ -253,7 +496,7 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
         senderName: 'System',
         senderAvatar: '📢',
         content: `⏰ GIFT CONTEST ENDED!\n\nNo gifts were sent during this contest. Better luck next time!`,
-        type: 'system'
+        type: 'gift'
       });
     } catch (e) {
       console.warn('Failed to announce contest end (no participants):', e);
@@ -308,7 +551,7 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
       senderName: 'System',
       senderAvatar: '🏆',
       content,
-      type: 'system'
+      type: 'gift'
     });
   } catch (e) {
     console.warn('Failed to announce contest winners:', e);
@@ -319,8 +562,18 @@ export async function endContest(contestId: string): Promise<{ winnerId: string;
 
 // Get leaderboard for active contest
 export function getContestLeaderboard(contest: GiftShowerContest): { userId: string; username: string; totalGifts: number; totalValue: number }[] {
+  if (contest.type === 'invite') {
+    return Object.entries(contest.inviteStats || {})
+      .map(([userId, data]) => ({
+        userId,
+        username: data.username,
+        totalGifts: data.successfulInvites,
+        totalValue: data.lotteryCodes?.length || data.successfulInvites
+      }))
+      .sort((a, b) => b.totalGifts - a.totalGifts);
+  }
   // leaderboard is based on number of gifts sent (totalGifts), not the credit value
-  return Object.entries(contest.giftStats)
+  return Object.entries(contest.giftStats || {})
     .map(([userId, data]) => ({
       userId,
       username: data.username,
@@ -343,7 +596,19 @@ export function calculatePrizeDistribution(contest: GiftShowerContest): {
   gifts: number;
   prize: number;
 }[] {
-  const entries = Object.entries(contest.giftStats);
+  if (contest.type === 'invite') {
+    const sorted = Object.entries(contest.inviteStats || {})
+      .sort((a, b) => b[1].successfulInvites - a[1].successfulInvites)
+      .slice(0, 5);
+    const fixedPrizes = contest.fixedTopPrizes?.length ? contest.fixedTopPrizes : INVITE_TOP_PRIZES;
+    return sorted.map(([userId, data], i) => ({
+      userId,
+      username: data.username,
+      gifts: data.successfulInvites,
+      prize: fixedPrizes[i] || 0
+    })).filter(x => x.prize > 0);
+  }
+  const entries = Object.entries(contest.giftStats || {});
   // sort by totalGifts descending
   const sorted = entries.sort((a, b) => b[1].totalGifts - a[1].totalGifts);
   const topParticipants = sorted.slice(0, 5);
@@ -383,17 +648,22 @@ export function getContestRemainingTime(contest: GiftShowerContest): { minutes: 
 export async function getAnyActiveContest(): Promise<GiftShowerContest | null> {
   const now = Date.now();
   const contestsRef = collection(db, 'giftContests');
-  const q = query(contestsRef, where('isActive', '==', true), limit(1));
+  const q = query(contestsRef, where('isActive', '==', true), limit(10));
   const snapshot = await getDocs(q);
   if (snapshot.empty) return null;
 
-  const contest = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as GiftShowerContest;
-  if (now > contest.endTime) {
-    // make sure stale contests are cleaned up
-    await endContest(contest.id);
-    return null;
+  const active: GiftShowerContest[] = [];
+  for (const docSnap of snapshot.docs) {
+    const contest = { id: docSnap.id, ...docSnap.data() } as GiftShowerContest;
+    if (now > contest.endTime) {
+      await endContest(contest.id);
+      continue;
+    }
+    active.push(contest);
   }
-  return contest;
+  if (!active.length) return null;
+  const idx = Math.floor(Math.random() * active.length);
+  return active[idx];
 }
 // new helper that fetches all currently active contests (not just one)
 export async function getActiveContests(): Promise<GiftShowerContest[]> {
@@ -401,7 +671,7 @@ export async function getActiveContests(): Promise<GiftShowerContest[]> {
   // contests as well as contests that ended within the past day so that the
   // frontend can continue showing results for a reasonable window.
   const now = Date.now();
-  const cutoff = now - 24 * 60 * 60 * 1000; // 24 hours ago
+  const cutoff = now - 24 * 60 * 60 * 1000; // active + ended in the last 24 hours
   const contestsRef = collection(db, 'giftContests');
   // query by endTime since it's comparable
   const q = query(contestsRef, where('endTime', '>=', cutoff), orderBy('endTime', 'desc'));
@@ -435,4 +705,69 @@ export async function getActiveContests(): Promise<GiftShowerContest[]> {
   }
 
   return recent;
+}
+
+export async function getActiveInviteContest(): Promise<GiftShowerContest | null> {
+  const now = Date.now();
+  const contestsRef = collection(db, 'giftContests');
+  const q = query(contestsRef, where('type', '==', 'invite'), where('isActive', '==', true), limit(1));
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) return null;
+  const contest = { id: snapshot.docs[0].id, ...snapshot.docs[0].data() } as GiftShowerContest;
+  if (now > contest.endTime) {
+    await endContest(contest.id);
+    return null;
+  }
+  return contest;
+}
+
+export async function recordInviteRegistrationForActiveContest(
+  inviterUid: string,
+  inviterUsername: string,
+  invitedEmail: string,
+  registeredUserId: string
+): Promise<{ lotteryCode?: string; contestId?: string }> {
+  const activeContest = await getActiveInviteContest();
+  if (!activeContest) return {};
+
+  const contestRef = doc(db, 'giftContests', activeContest.id);
+  const result = await runTransaction(db, async (tx) => {
+    const snap = await tx.get(contestRef);
+    if (!snap.exists()) return {};
+    const contest = { id: snap.id, ...snap.data() } as GiftShowerContest;
+    if (!contest.isActive || contest.type !== 'invite' || Date.now() > contest.endTime) {
+      return {};
+    }
+
+    const inviteStats = contest.inviteStats || {};
+    const lotteryEntries = contest.lotteryEntries || {};
+    const current = inviteStats[inviterUid] || {
+      username: inviterUsername,
+      successfulInvites: 0,
+      lotteryCodes: []
+    };
+
+    let lotteryCode = generateLotteryCode(contest.id);
+    while (lotteryEntries[lotteryCode]) {
+      lotteryCode = generateLotteryCode(contest.id);
+    }
+
+    tx.update(contestRef, {
+      [`inviteStats.${inviterUid}.username`]: inviterUsername,
+      [`inviteStats.${inviterUid}.successfulInvites`]: (current.successfulInvites || 0) + 1,
+      [`inviteStats.${inviterUid}.lotteryCodes`]: [...(current.lotteryCodes || []), lotteryCode],
+      [`lotteryEntries.${lotteryCode}`]: {
+        code: lotteryCode,
+        inviterUid,
+        inviterUsername,
+        invitedEmail,
+        registeredUserId,
+        createdAt: Date.now()
+      }
+    });
+
+    return { lotteryCode, contestId: contest.id };
+  });
+
+  return result as any;
 }

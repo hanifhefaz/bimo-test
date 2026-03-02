@@ -37,6 +37,7 @@ import {
 import { UserProfile } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { cn, presenceToColorClass, presenceLabel, isFriendRequestPending } from '@/lib/utils';
+import { useRealtimePresence, resolvePresence } from '@/hooks/useRealtimePresence';
 import { useNavigate } from 'react-router-dom';
 import { MessageCircle } from 'lucide-react';
 import {
@@ -63,6 +64,7 @@ export default function FriendsPage() {
   const [transferUsername, setTransferUsername] = useState('');
   const [transferUsernameConfirm, setTransferUsernameConfirm] = useState('');
   const [loadingFriends, setLoadingFriends] = useState(true);
+  const pendingPresenceMap = useRealtimePresence(pendingRequests);
 
   // Reload friends only when the friends list changes
   useEffect(() => {
@@ -251,7 +253,7 @@ export default function FriendsPage() {
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
         >
-          <h1 className="font-display text-2xl font-bold mb-4">Friends</h1>
+          <h1 className="font-display text-2xl font-bold mb-4 heading-tight">Friends</h1>
 
           {/* Tabs */}
           <div className="flex gap-2 mb-4">
@@ -308,7 +310,7 @@ export default function FriendsPage() {
                 <div className="text-center py-12 text-muted-foreground">
                   <Users className="w-12 h-12 mx-auto mb-3 opacity-50" />
                   <p>No friends yet</p>
-                  <p className="text-sm">Search for users to add them!</p>
+                  <p className="text-body">Search for users to add them!</p>
                 </div>
               ) : (
                 friends.map((friend, i) => {
@@ -345,13 +347,15 @@ export default function FriendsPage() {
                   <p>No pending requests</p>
                 </div>
               ) : (
-                pendingRequests.map((user, i) => (
+                pendingRequests.map((user, i) => {
+                  const presence = pendingPresenceMap[user.uid] || resolvePresence(user.presence, user.isOnline);
+                  return (
                   <motion.div
                     key={user.uid}
                     initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: i * 0.05 }}
-                    className="flex items-center gap-3 p-3 rounded-xl bg-secondary/30"
+                    className="surface-card flex items-center gap-3 p-3 hover:border-primary/30 transition-colors"
                   >
                     <div className="relative">
                       <CustomAvatar
@@ -362,16 +366,16 @@ export default function FriendsPage() {
                       />
                       <span
                         role="status"
-                        title={presenceLabel(user.presence || (user.isOnline ? 'online' : 'offline'))}
+                        title={presenceLabel(presence)}
                         className={cn(
                           'absolute bottom-1 right-1 z-20 pointer-events-none w-3 h-3 rounded-full border-2 border-card',
-                          presenceToColorClass(user.presence || (user.isOnline ? 'online' : 'offline'))
+                          presenceToColorClass(presence)
                         )}
                       />
                     </div>
                     <div className="flex-1">
                       <div className="font-medium"><Username user={user} /></div>
-                      <div className="text-xs text-muted-foreground">Level {user.level}</div>
+                      <div className="text-caption text-muted-foreground">Level {user.level}</div>
                     </div>
                     <Button
                       variant="success"
@@ -395,7 +399,8 @@ export default function FriendsPage() {
                       <X className="w-4 h-4" />
                     </Button>
                   </motion.div>
-                ))
+                  );
+                })
               )}
             </motion.div>
           )}
@@ -422,7 +427,7 @@ export default function FriendsPage() {
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-medium">Recommended for you</h3>
+                  <h3 className="text-body font-medium">Recommended for you</h3>
                   <Button variant="ghost" size="sm" onClick={loadRecommended} disabled={loadingRecommended}>
                     <RefreshCw className="w-4 h-4 mr-1" />
                     {loadingRecommended ? 'Loading...' : 'Shuffle'}
@@ -482,7 +487,7 @@ export default function FriendsPage() {
               <DialogTitle>Send Credits to <Username user={transferDialog.friend} /></DialogTitle>
             </DialogHeader>
             <div className="space-y-4 pt-4">
-              <div className="text-sm text-muted-foreground mb-2">
+              <div className="text-body text-muted-foreground mb-2">
                 For safety, please type the recipient's username twice.
               </div>
               <Input
@@ -502,7 +507,7 @@ export default function FriendsPage() {
                 onChange={(e) => setTransferAmount(e.target.value)}
               />
               {transferUsername && transferUsernameConfirm && transferUsername !== transferUsernameConfirm && (
-                <p className="text-xs text-destructive">Usernames do not match</p>
+                <p className="text-caption text-destructive">Usernames do not match</p>
               )}
               <div className="flex gap-2">
                 <Button variant="ghost" className="flex-1" onClick={() => setTransferDialog({ open: false })}>

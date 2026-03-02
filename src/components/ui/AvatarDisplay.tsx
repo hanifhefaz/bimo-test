@@ -36,7 +36,7 @@ export const AvatarDisplay = ({
         <span
           className={cn(
             "absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-card",
-            online ? "bg-success" : "bg-muted-foreground"
+            online ? "presence-dot-online" : "presence-dot-offline"
           )}
         />
       )}

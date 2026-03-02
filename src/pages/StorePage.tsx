@@ -4,15 +4,32 @@ import { NewAppLayout } from '@/components/layout/NewAppLayout';
 import { StoreItemCard } from '@/components/cards/StoreItemCard';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { STORE_ITEMS, CREDIT_PACKS, XP_BOOSTS, EMOTICON_PACKS, purchaseItem, purchaseAvatarItem, purchaseXPBoost, purchaseCreditPack, sellPackToUser, purchaseEmoticonPack } from '@/lib/firebaseOperations';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import {
+  STORE_ITEMS,
+  COMPANION_ITEMS,
+  CREDIT_PACKS,
+  XP_BOOSTS,
+  EMOTICON_PACKS,
+  purchaseItem,
+  purchaseAvatarItem,
+  purchaseXPBoost,
+  purchaseCreditPack,
+  sellPackToUser,
+  purchaseEmoticonPack,
+  purchaseCompanion,
+  hasActivePet,
+  getActiveAssetQuantity,
+  getPetExpiryTimestamp,
+  getAssetExpiryDisplayEntries
+} from '@/lib/firebaseOperations';
 import {
   getAvatarItemsByType,
   AVATAR_ITEM_TYPES,
   AvatarItem,
   computeFrameCss,
   needsSvgBorder,
-  makeBorderPoints,
-  BorderStyle
+  makeBorderPoints
 } from '@/lib/avatarItems';
 import { toast } from 'sonner';
 import { ShoppingBag, Heart, Gem, Store, Palette, Loader2, Coins, Zap, Smile, CheckCircle } from 'lucide-react';
@@ -33,6 +50,9 @@ export default function StorePage() {
   const [adminUsername, setAdminUsername] = useState<string>('');
   const [adminSelling, setAdminSelling] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
+  const [selectedAssetForExpiry, setSelectedAssetForExpiry] = useState<string | null>(null);
+  const [assetExpiryPage, setAssetExpiryPage] = useState(1);
+  const ASSET_EXPIRY_PAGE_SIZE = 10;
 
   useEffect(() => {
     // Simulate initial load
@@ -41,6 +61,10 @@ export default function StorePage() {
   }, []);
 
   if (!userProfile) return null;
+  const now = Date.now();
+  const fallbackExpiry = now + (365 * 24 * 60 * 60 * 1000);
+  const formatExpiry = (expiry: number | null | undefined) =>
+    new Date((expiry && Number.isFinite(expiry)) ? expiry : fallbackExpiry).toLocaleDateString();
 
   const pets = STORE_ITEMS.filter(i => i.type === 'pet');
   const assets = STORE_ITEMS.filter(i => i.type === 'asset');
@@ -114,6 +138,23 @@ export default function StorePage() {
     }
   };
 
+  const handlePurchaseCompanion = async (companionId: string) => {
+    setPurchasing(companionId);
+    try {
+      const result = await purchaseCompanion(userProfile.uid, companionId);
+      if (result.success) {
+        toast.success(result.message);
+        refreshProfile();
+      } else {
+        toast.error(result.message);
+      }
+    } catch (error) {
+      toast.error('Purchase failed');
+    } finally {
+      setPurchasing(null);
+    }
+  };
+
 // we no longer need a custom zigzag helper – use `makeBorderPoints` from
 // the shared avatarItems utilities which covers zigzag, spiked and ornate.
 
@@ -130,7 +171,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
       border
       flex flex-col items-center
       transition-colors duration-200
-      ${owned ? 'bg-success/10 border-success/30' : 'bg-primary/10 border-white/5'}
+      ${owned ? 'bg-success/10 border-success/30' : 'bg-card/70 border-border/70'}
     `}
   >
     <div
@@ -139,23 +180,29 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
         `
         w-full
         aspect-square
-        ${item.type === 'frame' ? 'rounded-full' : 'rounded-lg'}
+        ${
+          item.type === 'frame'
+            ? isRectFrameStyle(item.borderStyle)
+              ? 'rounded-lg'
+              : 'rounded-full'
+            : 'rounded-lg'
+        }
         flex items-center justify-center
         mb-2 sm:mb-3
         text-3xl sm:text-4xl md:text-5xl
         relative
-      ${item.type === 'frame' ? computeFrameCss(item, 2).className || '' : ''}
+      ${item.type === 'frame' ? computeFrameCss(item, 2, '#000000').className || '' : ''}
       `
       }
       style={
         item.type === 'background'
           ? { background: item.cssValue || 'var(--secondary)' }
           : item.type === 'frame'
-          ? computeFrameCss(item, 2).style
+          ? computeFrameCss(item, 2, '#000000').style
           : undefined
       }
     >
-      {item.type === 'frame' && needsSvgBorder(item.borderStyle) && item.cssValue && (
+      {item.type === 'frame' && needsSvgBorder(item.borderStyle) && (
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none"
           viewBox="0 0 100 100"
@@ -163,7 +210,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
           <polygon
             points={makeBorderPoints(item.borderStyle)}
             fill="none"
-            stroke={item.cssValue}
+            stroke="#000000"
             strokeWidth="2"
             strokeLinejoin="miter"
           />
@@ -176,7 +223,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
       {item.name}
     </h4>
 
-    <p className="text-[10px] sm:text-xs md:text-sm text-muted-foreground truncate">
+    <p className="text-[10px] sm:text-xs md:text-body text-muted-foreground truncate">
       {item.description}
     </p>
 
@@ -227,30 +274,40 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                   transition={{ duration: 4, repeat: Infinity, repeatDelay: 5, ease: "easeInOut" }}
                 />Store
               </div>
-          <p className="text-muted-foreground text-sm">
+          <p className="text-muted-foreground text-body">
             Purchase pets, assets, emoticons, avatar items, credits, and boosts
           </p>
         </motion.div>
 
         <Tabs defaultValue="pets" className="w-full">
-          <TabsList className="w-full mb-4 bg-primary/30 grid grid-cols-6">
-            <TabsTrigger value="pets" className="text-xs">
+          <TabsList className="w-full mb-4 bg-primary/30 grid grid-cols-4 sm:grid-cols-7 h-auto gap-1 p-1">
+            <TabsTrigger value="pets" className="text-caption h-10 flex items-center gap-1.5">
               <Heart className="w-4 h-4" />
+              <span>Pets</span>
             </TabsTrigger>
-            <TabsTrigger value="assets" className="text-xs">
+            <TabsTrigger value="assets" className="text-caption h-10 flex items-center gap-1.5">
               <Gem className="w-4 h-4" />
+              <span>Assets</span>
             </TabsTrigger>
-            <TabsTrigger value="emoticons" className="text-xs">
+            <TabsTrigger value="companions" className="text-caption h-10 flex items-center gap-1.5">
+              <span>🤖</span>
+              <span>Companion</span>
+            </TabsTrigger>
+            <TabsTrigger value="emoticons" className="text-caption h-10 flex items-center gap-1.5">
               <Smile className="w-4 h-4" />
+              <span>Emoticons</span>
             </TabsTrigger>
-            <TabsTrigger value="avatar" className="text-xs">
+            <TabsTrigger value="avatar" className="text-caption h-10 flex items-center gap-1.5">
               <Palette className="w-4 h-4" />
+              <span>Avatar</span>
             </TabsTrigger>
-            <TabsTrigger value="credits" className="text-xs">
+            <TabsTrigger value="credits" className="text-caption h-10 flex items-center gap-1.5">
               <Coins className="w-4 h-4" />
+              <span>Credits</span>
             </TabsTrigger>
-            <TabsTrigger value="boosts" className="text-xs">
+            <TabsTrigger value="boosts" className="text-caption h-10 flex items-center gap-1.5">
               <Zap className="w-4 h-4" />
+              <span>Boosts</span>
             </TabsTrigger>
           </TabsList>
 
@@ -264,7 +321,8 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                 <StoreItemCard
                   key={pet.id}
                   item={pet}
-                  owned={userProfile.pets.includes(pet.id)}
+                  owned={hasActivePet(userProfile, pet.id, now)}
+                  expiryText={formatExpiry(getPetExpiryTimestamp(userProfile, pet.id))}
                   onPurchase={() => handlePurchase(pet.id)}
                   delay={i * 0.05}
                 />
@@ -279,16 +337,120 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
               className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2"
             >
               {assets.map((asset, i) => (
+                (() => {
+                  const quantity = getActiveAssetQuantity(userProfile, asset.id, now);
+                  const entries = getAssetExpiryDisplayEntries(userProfile, asset.id, now);
+                  const singleExpiry = quantity === 1 ? entries[0]?.expiry ?? null : null;
+                  return (
                 <StoreItemCard
                   key={asset.id}
                   item={asset}
-                  owned={userProfile.assets.includes(asset.id)}
-                  quantity={userProfile.assetQuantities?.[asset.id] || 0}
+                  owned={quantity > 0}
+                  quantity={quantity}
+                  expiryText={formatExpiry(singleExpiry)}
+                  onCardClick={quantity > 1 ? () => { setSelectedAssetForExpiry(asset.id); setAssetExpiryPage(1); } : undefined}
                   allowMultiple={true}
                   onPurchase={() => handlePurchase(asset.id)}
                   delay={i * 0.05}
                 />
+                  );
+                })()
               ))}
+            </motion.div>
+            <Dialog open={!!selectedAssetForExpiry} onOpenChange={(open) => { if (!open) { setSelectedAssetForExpiry(null); setAssetExpiryPage(1); } }}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>
+                    {selectedAssetForExpiry
+                      ? `${STORE_ITEMS.find((i) => i.id === selectedAssetForExpiry)?.name || 'Asset'} Expiry Dates`
+                      : 'Asset Expiry Dates'}
+                  </DialogTitle>
+                </DialogHeader>
+                {(() => {
+                  const entries = selectedAssetForExpiry
+                    ? [...getAssetExpiryDisplayEntries(userProfile, selectedAssetForExpiry, now)]
+                    : [];
+                  const sortedEntries = entries.sort((a, b) => {
+                    if (a.active !== b.active) return a.active ? -1 : 1;
+                    if (a.expiry == null && b.expiry == null) return 0;
+                    if (a.expiry == null) return 1;
+                    if (b.expiry == null) return -1;
+                    return a.active ? a.expiry - b.expiry : b.expiry - a.expiry;
+                  });
+                  const totalPages = Math.max(1, Math.ceil(sortedEntries.length / ASSET_EXPIRY_PAGE_SIZE));
+                  const currentPage = Math.min(assetExpiryPage, totalPages);
+                  const start = (currentPage - 1) * ASSET_EXPIRY_PAGE_SIZE;
+                  const pageItems = sortedEntries.slice(start, start + ASSET_EXPIRY_PAGE_SIZE);
+                  return (
+                    <>
+                <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                  {pageItems.map((entry, idx) => (
+                    <div key={`${selectedAssetForExpiry}-${start + idx}`} className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2 text-sm">
+                      <span>#{start + idx + 1}</span>
+                      <span className={entry.active ? 'text-foreground' : 'text-muted-foreground'}>
+                        {formatExpiry(entry.expiry)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {sortedEntries.length > ASSET_EXPIRY_PAGE_SIZE && (
+                  <div className="mt-3 flex items-center justify-between">
+                    <Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setAssetExpiryPage((p) => Math.max(1, p - 1))}>
+                      Previous
+                    </Button>
+                    <span className="text-xs text-muted-foreground">Page {currentPage} / {totalPages}</span>
+                    <Button size="sm" variant="outline" disabled={currentPage >= totalPages} onClick={() => setAssetExpiryPage((p) => Math.min(totalPages, p + 1))}>
+                      Next
+                    </Button>
+                  </div>
+                )}
+                    </>
+                  );
+                })()}
+              </DialogContent>
+            </Dialog>
+          </TabsContent>
+
+          <TabsContent value="companions">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="space-y-3"
+            >
+              <div className="p-4 rounded-xl bg-primary/10 border border-primary/30">
+                <h3 className="font-semibold mb-1">Companions</h3>
+                <p className="text-body text-muted-foreground">Buy one or more companions. Equip one in Profile. They react via toast and major chatroom moments.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {COMPANION_ITEMS.map((companion) => {
+                  const owned = (userProfile.ownedCompanions || []).includes(companion.id);
+                  return (
+                    <div key={companion.id} className={`rounded-xl border p-4 ${owned ? 'bg-success/10 border-success/30' : 'bg-primary/10 border-primary/20'}`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-2xl">{companion.emoji}</span>
+                          <div>
+                            <div className="font-semibold">{companion.name}</div>
+                            <div className="text-xs text-muted-foreground capitalize">{companion.style}</div>
+                          </div>
+                        </div>
+                        {owned ? <CheckCircle className="w-5 h-5 text-success" /> : <span className="font-semibold">${formatWithCommas(companion.price)}</span>}
+                      </div>
+                      <p className="text-xs text-muted-foreground mb-3">{companion.description}</p>
+                      {!owned && (
+                        <Button
+                          size="sm"
+                          className="w-full"
+                          onClick={() => handlePurchaseCompanion(companion.id)}
+                          disabled={purchasing === companion.id || userProfile.credits < companion.price}
+                        >
+                          {purchasing === companion.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Buy Companion'}
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </motion.div>
           </TabsContent>
 
@@ -301,7 +463,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
             >
               <div className="p-4 rounded-xl bg-primary/10 border border-primary/30 mb-4">
                 <h3 className="font-semibold text-primary mb-2">😀 Emoticon Packs</h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-body text-muted-foreground">
                   Buy emoticon packs to use fun emojis in chat! Once purchased, an emoticon button will appear in the chat input.
                 </p>
               </div>
@@ -322,7 +484,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                       <div className="flex items-start justify-between mb-3">
                         <div>
                           <h4 className="font-bold">{pack.name}</h4>
-                          <p className="text-xs text-muted-foreground">{pack.description}</p>
+                          <p className="text-caption text-muted-foreground">{pack.description}</p>
                         </div>
                         {isOwned ? (
                           <span className="px-2 py-1 text-success text-xs rounded-full"><CheckCircle/></span>
@@ -337,7 +499,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                           <span key={idx} className="text-lg">{e}</span>
                         ))}
                         {/* {pack.emoticons.length > 10 && (
-                          <span className="text-xs text-muted-foreground self-center">+{pack.emoticons.length - 10} more</span>
+                          <span className="text-caption text-muted-foreground self-center">+{pack.emoticons.length - 10} more</span>
                         )} */}
                       </div>
 
@@ -370,11 +532,11 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                 const items = getAvatarItemsByType(type);
                 return (
                   <div key={type}>
-                    <h3 className="font-semibold mb-3 text-sm">
+                    <h3 className="font-semibold mb-3 text-body">
                       {categoryLabels[type] || type}
                     </h3>
 
-                    <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-7 gap-2 sm:gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-3">
                       {items.map((item, i) => {
                         const owned = userProfile.ownedAvatarItems?.includes(item.id) || false;
 
@@ -390,30 +552,56 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                               p-2 sm:p-3 md:p-4
                               rounded-xl
                               border
-                              flex flex-col items-center
+                              min-h-[220px] flex flex-col items-center justify-between
                               transition-colors duration-200
-                              ${owned ? 'bg-success/10 border-success/30' : 'bg-primary/10 border-white/5'}
+                              ${owned ? 'bg-success/10 border-success/30' : 'bg-card/70 border-border/70'}
                             `}
                           >
                             <div
-                              className="
+                              className={`
                                 w-full
                                 aspect-square
-                                rounded-lg
+                                ${item.type === 'frame'
+                                  ? isRectFrameStyle(item.borderStyle)
+                                    ? 'rounded-lg'
+                                    : 'rounded-full'
+                                  : 'rounded-lg'}
                                 flex items-center justify-center
                                 mb-2 sm:mb-3
                                 text-3xl sm:text-4xl md:text-5xl
-                              "
-                              style={{ background: item.cssValue || 'var(--secondary)' }}
+                                relative
+                                ${item.type === 'frame' ? computeFrameCss(item, 2, '#000000').className || '' : ''}
+                              `}
+                              style={
+                                item.type === 'background'
+                                  ? { background: item.cssValue || 'var(--secondary)' }
+                                  : item.type === 'frame'
+                                  ? computeFrameCss(item, 2, '#000000').style
+                                  : undefined
+                              }
                             >
+                              {item.type === 'frame' && needsSvgBorder(item.borderStyle) && (
+                                <svg
+                                  className="absolute inset-0 w-full h-full pointer-events-none"
+                                  viewBox="0 0 100 100"
+                                >
+                                  <polygon
+                                    points={makeBorderPoints(item.borderStyle)}
+                                    fill="none"
+                                    stroke="#000000"
+                                    strokeWidth="2"
+                                    strokeLinejoin="miter"
+                                  />
+                                </svg>
+                              )}
                               {item.emoji}
                             </div>
 
-                            <h4 className="font-medium text-xs sm:text-sm md:text-base truncate">
+                            <h4 className="font-medium text-caption sm:text-body text-center leading-tight break-words w-full min-h-[2.25rem]">
                               {item.name}
                             </h4>
 
-                            <p className="text-[10px] sm:text-xs md:text-sm text-muted-foreground truncate text-center">
+                            <p className="text-caption text-muted-foreground text-center leading-snug break-words w-full min-h-[2.6rem]">
                               {item.description}
                             </p>
 
@@ -456,7 +644,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
             >
               <div className="p-4 rounded-xl bg-sky-400/10 border border-sky-500/30 mb-4">
                 <h3 className="font-semibold text-sky-500 mb-2">💰 Buy Credits</h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-body text-muted-foreground">
                   Purchase credit packs to use in the app. Pro grants Merchant status and Elite grants Mentor status automatically when purchased.
                 </p>
 
@@ -490,7 +678,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.05 }}
                     className={`p-4 rounded-xl border ${
-                      pack.popular ? 'bg-primary/30 border-default/30' : 'bg-primary/10 border-white/5'
+                      pack.popular ? 'bg-primary/30 border-default/30' : 'bg-card/70 border-border/70'
                     } text-center relative`}
                   >
                     {pack.popular && (
@@ -501,7 +689,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     <div className="text-3xl mb-2">{pack.emoji}</div>
                     <h4 className="font-bold text-sm mb-1">{pack.name || pack.id}</h4>
                     <h4 className="font-bold text-lg text-sky-500">{formatWithCommas(pack.credits)}</h4>
-                    <p className="text-xs text-muted-foreground mb-3">credits</p>
+                    <p className="text-caption text-muted-foreground mb-3">credits</p>
                     <div className="flex items-center justify-center gap-1 text-lg font-semibold">
                       <img
                         src={UsdtLogo}
@@ -514,7 +702,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     {/* Special notes for automatic roles */}
                     {pack.id === 'pack_standard' && (
                       <>
-                        <p className="text-xs text-muted-foreground mt-2">Includes <strong>Merchant</strong> status (<span className='text-violet-500'>purple</span> username)</p>
+                        <p className="text-caption text-muted-foreground mt-2">Includes <strong>Merchant</strong> status (<span className='text-violet-500'>purple</span> username)</p>
                         {userProfile.merchantExpiry && userProfile.merchantExpiry > Date.now() && (userProfile.merchantLevel === 'basic' || userProfile.merchantLevel === 'standard' as any) && (
                           <p className="text-xs text-violet-500 mt-1">Active until {new Date(userProfile.merchantExpiry).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
                         )}
@@ -522,7 +710,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     )}
                     {pack.id === 'pack_pro' && (
                       <>
-                        <p className="text-xs text-muted-foreground mt-2">Includes <strong>Merchant</strong> status (<span className='text-gold'>gold</span> username)</p>
+                        <p className="text-caption text-muted-foreground mt-2">Includes <strong>Merchant</strong> status (<span className='text-gold'>gold</span> username)</p>
                         {userProfile.merchantExpiry && userProfile.merchantExpiry > Date.now() && userProfile.merchantLevel === 'pro' && (
                           <p className="text-xs text-gold mt-1">Active until {new Date(userProfile.merchantExpiry).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
                         )}
@@ -530,14 +718,14 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     )}
                     {pack.id === 'pack_elite' && (
                       <>
-                        <p className="text-xs text-muted-foreground mt-2">Includes <strong>Mentor</strong> status (<span className='text-pink-500'>pink</span> username)</p>
+                        <p className="text-caption text-muted-foreground mt-2">Includes <strong>Mentor</strong> status (<span className='text-pink-500'>pink</span> username)</p>
                         {userProfile.mentorExpiry && userProfile.mentorExpiry > Date.now() && userProfile.mentorLevel === 'elite' && (
                           <p className="text-xs text-pink-500 mt-1">Active until {new Date(userProfile.mentorExpiry).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</p>
                         )}
                       </>
                     )}
 
-                    <p className="text-xs text-muted-foreground mt-3">Contact an admin to purchase this pack.</p>
+                    <p className="text-caption text-muted-foreground mt-3">Contact an admin to purchase this pack.</p>
                   </motion.div>
                 ))}
               </div>
@@ -549,19 +737,19 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
               transition={{ duration: 0.4 }}
               className="mt-6"
             >
-              <div className="rounded-2xl border border-secondary/30 bg-secondary/10 p-6">
+              <div className="rounded-2xl border border-border bg-card/70 p-6">
 
                 {/* Header */}
                 <div>
                   <h3 className="text-lg sm:text-xl font-semibold flex items-center gap-2">
                     💳 Payment Methods
                   </h3>
-                  <p className="text-sm text-muted-foreground mt-1 max-w-xl">
+                  <p className="text-body text-muted-foreground mt-1 max-w-xl">
                     Purchase credit packs via Binance Pay or deposit USDT using supported networks.
                   </p>
                 </div>
 
-                <div className="h-px bg-secondary/30 my-6" />
+                <div className="h-px bg-border/70 my-6" />
 
                 {/* Responsive Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -589,7 +777,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     </div>
 
                     <h4 className="mt-4 font-medium">Binance Pay</h4>
-                    <p className="text-xs text-muted-foreground mt-1">
+                    <p className="text-caption text-muted-foreground mt-1">
                       Use the provided Pay ID to complete your payment.
                     </p>
 
@@ -617,14 +805,14 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                     </div>
 
                     <h4 className="mt-4 font-medium">USDT Deposit</h4>
-                    <p className="text-xs text-muted-foreground mt-1">
+                    <p className="text-caption text-muted-foreground mt-1">
                       Deposit USDT via supported blockchain networks.
                     </p>
                   </a>
 
                 </div>
 
-                <p className="text-xs text-muted-foreground mt-6 text-center md:text-left">
+                <p className="text-caption text-muted-foreground mt-6 text-center md:text-left">
                   Use the Pay ID or deposit wallet details shown above when completing your transaction.
                 </p>
 
@@ -645,7 +833,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
             >
               <div className="p-4 rounded-xl bg-sky-500/10 border border-sky-500/30 mb-4">
                 <h3 className="font-semibold text-sky-500 mb-2">⚡ XP Boosts</h3>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-body text-muted-foreground">
                   Boost your XP gain for a limited time! Only one boost can be active at a time.
                 </p>
                 {userProfile.xpBoostMultiplier && userProfile.xpBoostMultiplier > 1 && userProfile.xpBoostEndTime && userProfile.xpBoostEndTime > Date.now() && (
@@ -664,7 +852,7 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.05 }}
-                      className="p-4 rounded-xl bg-primary/10 border border-white/5 text-center"
+                      className="p-4 rounded-xl bg-card/70 border border-border/70 text-center"
                     >
                       <div className="text-3xl mb-2">{boost.emoji}</div>
                       <h4 className="font-bold text-accent">{boost.name}</h4>
@@ -690,9 +878,9 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
 
         {/* Admin Sale (admins only) */}
         {userProfile.isAdmin && (
-          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-6 p-4 rounded-xl bg-secondary/20 border border-white/5">
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-6 p-4 rounded-xl bg-card/70 border border-border/70">
             <h3 className="font-semibold mb-2 text-sky-500">Admin — Sell Credit Pack</h3>
-            <p className="text-sm text-muted-foreground mb-3">Select a pack and enter the recipient username to sell a pack directly to a user.</p>
+            <p className="text-body text-muted-foreground mb-3">Select a pack and enter the recipient username to sell a pack directly to a user.</p>
 
             <div className="flex items-center gap-2 mb-3">
               <select className="rounded px-2 py-1 bg-background border" value={adminPack} onChange={(e) => setAdminPack(e.target.value)}>
@@ -731,13 +919,13 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.5 }}
-          className="mt-6 p-4 rounded-xl bg-secondary/30 border border-white/5"
+          className="mt-6 p-4 rounded-xl bg-card/70 border border-border/70"
         >
           <div className="flex items-start gap-3">
             <ShoppingBag className="w-5 h-5 text-primary mt-0.5" />
             <div>
               <h4 className="font-medium mb-1">About the Store</h4>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-body text-muted-foreground">
                 • Pets can be fed by friends who own the same pet<br />
                 • Assets generate daily credits (collect on home)<br />
                 • Avatar items customize your profile appearance<br />
@@ -751,4 +939,9 @@ const AvatarItemCard = ({ item, owned }: { item: AvatarItem; owned: boolean }) =
       </div>
     </NewAppLayout>
   );
+}
+
+function isRectFrameStyle(style?: string): boolean {
+  return style === 'square'
+    || style === 'rounded-rectangle';
 }

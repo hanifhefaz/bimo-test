@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
 import { NewAppLayout } from '@/components/layout/NewAppLayout';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { CustomAvatar } from '@/components/CustomAvatar';
 import Username from '@/components/Username';
 import PetAnimation from '@/components/PetAnimation';
@@ -39,7 +40,12 @@ import {
   sendFriendRequest,
   getPrivateConversationId,
   STORE_ITEMS,
-  feedPet
+  feedPet,
+  getActivePetIds,
+  getActiveAssetIds,
+  getActiveAssetQuantity,
+  getPetExpiryTimestamp,
+  getAssetExpiryDisplayEntries
 } from '@/lib/firebaseOperations';
 import { UserProfile } from '@/contexts/AuthContext';
 import { getBadgeForLevel } from '@/lib/badges';
@@ -63,6 +69,9 @@ export default function UserProfilePage() {
 
   const [showReceived, setShowReceived] = useState(false);
   const [showSent, setShowSent] = useState(false);
+  const [selectedAssetForExpiry, setSelectedAssetForExpiry] = useState<string | null>(null);
+  const [assetExpiryPage, setAssetExpiryPage] = useState(1);
+  const ASSET_EXPIRY_PAGE_SIZE = 10;
 
   // Load the profile when the route changes. We purposely avoid
   // depending on `userProfile` here because updates to the logged-in
@@ -213,8 +222,12 @@ export default function UserProfilePage() {
 
   const badge = getBadgeForLevel(profile.level);
   const country = getCountryByCode(profile.country);
-  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && profile.pets.includes(i.id));
-  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && profile.assets.includes(i.id));
+  const nowTs = Date.now();
+  const fallbackExpiry = nowTs + (365 * 24 * 60 * 60 * 1000);
+  const formatExpiry = (expiry: number | null | undefined) =>
+    new Date((expiry && Number.isFinite(expiry)) ? expiry : fallbackExpiry).toLocaleDateString();
+  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && getActivePetIds(profile, nowTs).includes(i.id));
+  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && getActiveAssetIds(profile, nowTs).includes(i.id));
   const equippedBackground = profile.avatarItems?.background ? getAvatarItemById(profile.avatarItems.background) : null;
   // determine if we are friends by checking either side's friend list
   const isFriend =
@@ -276,10 +289,10 @@ export default function UserProfilePage() {
                 </div>
 
                 {profile.statusMessage && (
-                  <p className="text-sm text-muted-foreground mt-1 italic">"{profile.statusMessage}"</p>
+                  <p className="text-body text-muted-foreground mt-1 italic">"{profile.statusMessage}"</p>
                 )}
 
-                <div className="flex items-center gap-3 mt-2 text-sm text-muted-foreground">
+                <div className="flex items-center gap-3 mt-2 text-body text-muted-foreground">
                   {country && (
                     <span className="flex items-center gap-1">
                       <span>{country.flag}</span>
@@ -287,7 +300,7 @@ export default function UserProfilePage() {
                     </span>
                   )}
                 </div>
-                 <span className="flex items-center gap-1 mt-2 text-sm text-muted-foreground"> Joined: {formatMemberSince(profile.createdAt)}
+                 <span className="flex items-center gap-1 mt-2 text-body text-muted-foreground"> Joined: {formatMemberSince(profile.createdAt)}
                   </span>
               </div>
             </div>
@@ -441,6 +454,11 @@ export default function UserProfilePage() {
                   >
                     <PetAnimation animationData={pet.animationData} size={60} />
                     <span className="font-medium text-sm">{pet.name}</span>
+                    {isSelf && (
+                      <span className="text-[11px] text-muted-foreground">
+                        Expires: {formatExpiry(getPetExpiryTimestamp(profile, pet.id))}
+                      </span>
+                    )}
                     {canFeed && (
                       <Button
                         variant="outline"
@@ -492,15 +510,28 @@ export default function UserProfilePage() {
             </h3>
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
               {ownedAssets.map((asset) => {
-                const quantity = profile.assetQuantities?.[asset.id] || 1;
+                const quantity = getActiveAssetQuantity(profile, asset.id, nowTs);
+                const expiryEntries = getAssetExpiryDisplayEntries(profile, asset.id, nowTs);
+                const singleExpiry = quantity === 1 ? expiryEntries[0]?.expiry ?? null : null;
                 return (
                   <motion.div
                     key={asset.id}
                     whileHover={{ scale: 1.02 }}
-                    className="relative p-3 rounded-xl bg-secondary/30 border border-white/5 flex flex-col items-center gap-1"
+                    className={`relative p-3 rounded-xl bg-secondary/30 border border-white/5 flex flex-col items-center gap-1 ${isSelf && quantity > 1 ? 'cursor-pointer' : ''}`}
+                    onClick={() => {
+                      if (isSelf && quantity > 1) {
+                        setSelectedAssetForExpiry(asset.id);
+                        setAssetExpiryPage(1);
+                      }
+                    }}
                   >
                     <PetAnimation animationData={asset.animationData} size={60} />
                     <span className="font-medium text-xs text-center">{asset.name}</span>
+                    {isSelf && quantity === 1 && (
+                      <span className="text-[11px] text-muted-foreground">
+                        Expires: {formatExpiry(singleExpiry)}
+                      </span>
+                    )}
                     {quantity > 1 && (
                       <Badge
                         variant="default"
@@ -515,7 +546,62 @@ export default function UserProfilePage() {
             </div>
           </motion.div>
         )}
+        {isSelf && (
+          <Dialog open={!!selectedAssetForExpiry} onOpenChange={(open) => { if (!open) { setSelectedAssetForExpiry(null); setAssetExpiryPage(1); } }}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>
+                  {selectedAssetForExpiry
+                    ? `${STORE_ITEMS.find((i) => i.id === selectedAssetForExpiry)?.name || 'Asset'} Expiry Dates`
+                    : 'Asset Expiry Dates'}
+                </DialogTitle>
+              </DialogHeader>
+              {(() => {
+                const entries = selectedAssetForExpiry
+                  ? [...getAssetExpiryDisplayEntries(profile, selectedAssetForExpiry, nowTs)]
+                  : [];
+                const sortedEntries = entries.sort((a, b) => {
+                  if (a.active !== b.active) return a.active ? -1 : 1;
+                  if (a.expiry == null && b.expiry == null) return 0;
+                  if (a.expiry == null) return 1;
+                  if (b.expiry == null) return -1;
+                  return a.active ? a.expiry - b.expiry : b.expiry - a.expiry;
+                });
+                const totalPages = Math.max(1, Math.ceil(sortedEntries.length / ASSET_EXPIRY_PAGE_SIZE));
+                const currentPage = Math.min(assetExpiryPage, totalPages);
+                const start = (currentPage - 1) * ASSET_EXPIRY_PAGE_SIZE;
+                const pageItems = sortedEntries.slice(start, start + ASSET_EXPIRY_PAGE_SIZE);
+                return (
+                  <>
+              <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                {pageItems.map((entry, idx) => (
+                  <div key={`${selectedAssetForExpiry}-${start + idx}`} className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2 text-sm">
+                    <span>#{start + idx + 1}</span>
+                    <span className={entry.active ? 'text-foreground' : 'text-muted-foreground'}>
+                      {formatExpiry(entry.expiry)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {sortedEntries.length > ASSET_EXPIRY_PAGE_SIZE && (
+                <div className="mt-3 flex items-center justify-between">
+                  <Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setAssetExpiryPage((p) => Math.max(1, p - 1))}>
+                    Previous
+                  </Button>
+                  <span className="text-xs text-muted-foreground">Page {currentPage} / {totalPages}</span>
+                  <Button size="sm" variant="outline" disabled={currentPage >= totalPages} onClick={() => setAssetExpiryPage((p) => Math.min(totalPages, p + 1))}>
+                    Next
+                  </Button>
+                </div>
+              )}
+                  </>
+                );
+              })()}
+            </DialogContent>
+          </Dialog>
+        )}
       </div>
     </NewAppLayout>
   );
 }
+

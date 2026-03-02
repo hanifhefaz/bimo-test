@@ -3,12 +3,18 @@ import { cn } from '@/lib/utils';
 import { ChatMessage as ChatMessageType } from '@/lib/firebaseOperations';
 import { CustomAvatar } from '@/components/CustomAvatar';
 import PetAnimation from '@/components/PetAnimation';
-import { STORE_ITEMS } from '@/lib/firebaseOperations';
+import { STORE_ITEMS, COMPANION_ITEMS } from '@/lib/firebaseOperations';
 import { Store, Check, CheckCheck, Clock, Shield } from 'lucide-react';
 
 interface ChatMessageProps {
-  message: ChatMessageType & { senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' | 'chatadmin'; senderIsAdmin?: boolean; senderIsMentor?: boolean; senderIsChatAdmin?: boolean };
+  message: ChatMessageType & {
+    senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' | 'chatadmin';
+    senderIsAdmin?: boolean;
+    senderIsMentor?: boolean;
+    senderIsChatAdmin?: boolean;
+  };
   isOwn: boolean;
+  isMentionedToMe?: boolean;
 }
 
 function MessageDeliveryStatus({ status }: { status?: string }) {
@@ -29,19 +35,42 @@ function MessageDeliveryStatus({ status }: { status?: string }) {
 // Get username color based on role - universal across all chats
 function getUsernameColor(message: ChatMessageProps['message'] & { senderMerchantLevel?: string; senderIsStaff?: boolean; senderRole?: 'user' | 'merchant' | 'mentor' | 'admin' | 'staff' | 'chatadmin' }): string {
   // staff first
-  if (message.senderIsStaff || message.senderRole === 'staff') return 'text-black';
+  if (message.senderIsStaff || message.senderRole === 'staff') return 'text-accent';
   if (message.senderIsAdmin || message.senderRole === 'admin') return 'text-destructive';
   if (message.senderIsChatAdmin || message.senderRole === 'chatadmin') return 'text-yellow-500';
   if (message.senderIsMentor || message.senderRole === 'mentor') return 'text-pink-500';
   if (message.senderIsMerchant || message.senderRole === 'merchant') {
     // Pro merchant = gold, standard merchant = purple
-    if ((message as any).senderMerchantLevel === 'pro') return 'text-gold';
+    if ((message as any).senderMerchantLevel === 'pro') return 'text-violet-700';
     return 'text-violet-500';
   }
   return 'text-sky-500';
 }
 
-export function ChatMessage({ message, isOwn }: ChatMessageProps) {
+function renderMessageContentWithMentions(content: string, mentionUsernames: string[] = []): React.ReactNode {
+  if (!mentionUsernames.length) return content;
+
+  const uniqueUsernames = Array.from(new Set(mentionUsernames.filter(Boolean)));
+  const pattern = uniqueUsernames.map((username) => username.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  if (!pattern) return content;
+
+  const splitRegex = new RegExp(`(@(?:${pattern}))`, 'gi');
+  const matchRegex = new RegExp(`^@(?:${pattern})$`, 'i');
+  const parts = content.split(splitRegex);
+
+  return parts.map((part, index) => {
+    if (matchRegex.test(part)) {
+      return (
+        <span key={`mention-${index}`} className="font-semibold text-primary">
+          {part}
+        </span>
+      );
+    }
+    return <span key={`text-${index}`}>{part}</span>;
+  });
+}
+
+export function ChatMessage({ message, isOwn, isMentionedToMe = false }: ChatMessageProps) {
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
@@ -49,6 +78,67 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
   const isAdmin = message.senderIsAdmin || message.senderRole === 'admin';
   const isChatAdmin = message.senderIsChatAdmin || message.senderRole === 'chatadmin';
   const isMerchant = message.senderIsMerchant || message.senderRole === 'merchant';
+  const isPrivateMessage = (message as any).targetUserId !== undefined;
+  const isPrivateBotMessage = isPrivateMessage && message.senderId === 'bot';
+
+  const renderInlineTokens = (text: string): React.ReactNode[] => {
+    const parts: React.ReactNode[] = [];
+    const tokenRegex = /<(pet|asset|companion):([a-z0-9-_]+)>/ig;
+    let lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = tokenRegex.exec(text)) !== null) {
+      const idx = m.index;
+      const token = m[0];
+      const type = m[1].toLowerCase();
+      const id = m[2];
+      if (idx > lastIndex) {
+        parts.push(<span key={`t-${lastIndex}`}>{text.slice(lastIndex, idx)}</span>);
+      }
+
+      if (type === 'pet') {
+        const pet = STORE_ITEMS.find(i => i.id === id && i.type === 'pet');
+        if (pet?.animationData) {
+          parts.push(
+            <span key={`pet-${id}-${idx}`} className="inline-flex items-center mx-1 align-middle">
+              <PetAnimation animationData={pet.animationData} size={24} />
+            </span>
+          );
+        } else {
+          parts.push(<span key={`pet-${id}-${idx}`}>{pet ? pet.name : id}</span>);
+        }
+      } else if (type === 'asset') {
+        const asset = STORE_ITEMS.find(i => i.id === id && i.type === 'asset');
+        if (asset?.animationData) {
+          parts.push(
+            <span key={`asset-${id}-${idx}`} className="inline-flex items-center mx-1 align-middle">
+              <PetAnimation animationData={asset.animationData} size={24} />
+            </span>
+          );
+        } else {
+          parts.push(<span key={`asset-${id}-${idx}`}>{asset ? asset.name : id}</span>);
+        }
+      } else {
+        const companion = COMPANION_ITEMS.find(i => i.id === id);
+        if (companion?.animationData) {
+          parts.push(
+            <span key={`companion-${id}-${idx}`} className="inline-flex items-center mx-1 align-middle">
+              <PetAnimation animationData={companion.animationData} size={24} />
+            </span>
+          );
+        } else {
+          parts.push(
+            <span key={`companion-${id}-${idx}`}>
+              {companion ? `${companion.emoji} ${companion.name}` : id}
+            </span>
+          );
+        }
+      }
+
+      lastIndex = idx + token.length;
+    }
+    if (lastIndex < text.length) parts.push(<span key="t-end">{text.slice(lastIndex)}</span>);
+    return parts;
+  };
 
   if (message.type === 'system') {
     // If the system message looks like "RoomName: Announcement...", render it left-aligned
@@ -66,52 +156,7 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
           <div className="inline-block rounded-xl px-3 py-2 bg-secondary/30 border border-white/5 max-w-[90%] break-words">
             <span className="text-xs font-semibold text-destructive mr-2 whitespace-nowrap">{roomName}:</span>
             <span className="text-sm text-foreground break-words">
-              {
-                // Parse rest for <pet:petId> and <asset:assetId> tokens and render inline animations
-                (() => {
-                  const parts: React.ReactNode[] = [];
-                  const tokenRegex = /<(pet|asset):([a-z0-9-_]+)>/ig;
-                  let lastIndex = 0;
-                  let m: RegExpExecArray | null;
-                  while ((m = tokenRegex.exec(rest)) !== null) {
-                    const idx = m.index;
-                    const token = m[0];
-                    const type = m[1];
-                    const id = m[2];
-                    if (idx > lastIndex) {
-                      parts.push(<span key={`t-${lastIndex}`}>{rest.slice(lastIndex, idx)}</span>);
-                    }
-
-                    if (type === 'pet') {
-                      const pet = STORE_ITEMS.find(i => i.id === id && i.type === 'pet');
-                      if (pet && pet.animationData) {
-                        parts.push(
-                          <span key={`pet-${id}`} className="inline-flex items-center mx-1 align-middle">
-                            <PetAnimation animationData={pet.animationData} size={24} />
-                          </span>
-                        );
-                      } else {
-                        parts.push(<span key={`pet-${id}`}>{pet ? pet.name : id}</span>);
-                      }
-                    } else {
-                      const asset = STORE_ITEMS.find(i => i.id === id && i.type === 'asset');
-                      if (asset && asset.animationData) {
-                        parts.push(
-                          <span key={`asset-${id}`} className="inline-flex items-center mx-1 align-middle">
-                            <PetAnimation animationData={asset.animationData} size={24} />
-                          </span>
-                        );
-                      } else {
-                        parts.push(<span key={`asset-${id}`}>{asset ? asset.name : id}</span>);
-                      }
-                    }
-
-                    lastIndex = idx + token.length;
-                  }
-                  if (lastIndex < rest.length) parts.push(<span key={`t-end`}>{rest.slice(lastIndex)}</span>);
-                  return parts;
-                })()
-              }
+              {renderInlineTokens(rest)}
             </span>
           </div>
         </motion.div>
@@ -125,7 +170,7 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
         animate={{ opacity: 1, y: 0 }}
         className="flex justify-center my-2"
       >
-        <span className="text-xs text-muted-foreground bg-secondary/50 px-3 py-1 rounded-full">
+        <span className="text-caption text-muted-foreground bg-secondary/50 px-3 py-1 rounded-full">
           {message.content}
         </span>
       </motion.div>
@@ -140,7 +185,7 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
         className="flex justify-center my-2"
       >
         <span className="text-sm text-primary bg-primary/10 px-4 py-1.5 rounded-full border border-primary/20">
-          {message.content}
+          {renderInlineTokens(String(message.content || ''))}
         </span>
       </motion.div>
     );
@@ -166,7 +211,7 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
   }
 
   if (message.type === 'game') {
-    const isPrivate = (message as any).targetUserId !== undefined;
+    const isPrivate = isPrivateMessage;
     const isBotPrivate = isPrivate && message.senderId === 'bot';
 
     return (
@@ -180,18 +225,18 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
             className={cn(
               "px-4 py-2 rounded-xl text-sm whitespace-pre-line max-w-[80vw] break-words",
               isPrivate
-                ? "bg-muted/30 border border-muted/50 text-muted-foreground italic"
+                ? (isBotPrivate ? "bg-secondary/10 border border-primary/20" : "bg-muted/30 border border-muted/50 text-muted-foreground italic")
                 : "bg-secondary/10"
             )}
           >
             {isPrivate && <span className="text-xs mr-1">🔒</span>}
             <div
               className="text-sm break-words"
-              style={{ color: isPrivate ? '#db2777' : '#2d7d95', whiteSpace: 'normal' }}
+              style={{ color: isBotPrivate ? '#2d7d95' : (isPrivate ? '#db2777' : '#2d7d95'), whiteSpace: 'normal' }}
             >
               <span
                 className="font-semibold break-words"
-                style={{ color: isPrivate ? '#db2777' : '#84ae35' }}
+                style={{ color: isBotPrivate ? '#84ae35' : (isPrivate ? '#db2777' : '#84ae35') }}
               >
                 {message.senderName}:
               </span>{' '}
@@ -203,9 +248,6 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
   }
 
   const usernameColor = getUsernameColor(message);
-
-  // A message is considered private if it has a targetUserId property
-  const isPrivateMessage = (message as any).targetUserId !== undefined;
 
   return (
     <motion.div
@@ -221,8 +263,9 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
             isOwn
               ? "inline-flex items-baseline gap-1.5 rounded-xl"
               : "inline-block rounded-xl",
-            // private messages should look muted and pink
-            isPrivateMessage && "bg-muted/30 border border-muted/50 italic"
+            isPrivateBotMessage
+              ? "bg-secondary/10 border border-primary/20"
+              : (isPrivateMessage ? "bg-muted/30 border border-muted/50 italic" : "")
           )}
         >
           {/* Icons removed: use color only for admin/merchant distinction */}
@@ -233,12 +276,13 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
 
           <span
             className={cn(
-              "text-sm break-words",
-              isPrivateMessage ? "text-pink-500" : "text-foreground",
+              "break-words",
+              isMentionedToMe ? "text-base font-semibold text-primary" : "text-sm",
+              isPrivateBotMessage ? "text-[#2d7d95]" : (isPrivateMessage ? "text-pink-500" : "text-foreground"),
               !isOwn && "ml-1"
             )}
           >
-            {message.content}
+            {renderMessageContentWithMentions(message.content, message.mentionUsernames || [])}
           </span>
         </div>
 
@@ -251,3 +295,4 @@ export function ChatMessage({ message, isOwn }: ChatMessageProps) {
     </motion.div>
   );
 }
+

@@ -7,8 +7,10 @@ import { presenceToColorClass, presenceLabel } from '@/lib/utils';
 import { StatsCard } from '@/components/cards/StatsCard';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import {
   Coins,
   Star,
@@ -35,14 +37,27 @@ import {
 } from 'lucide-react';
 import PetAnimation from '@/components/PetAnimation';
 import { Badge } from '@/components/ui/badge';
-import { STORE_ITEMS, transferCredits, getTransactionHistory, Transaction, getXpProgress } from '@/lib/firebaseOperations';
+import {
+  STORE_ITEMS,
+  transferCredits,
+  getTransactionHistory,
+  Transaction,
+  getXpProgress,
+  getActivePetIds,
+  getActiveAssetIds,
+  getActiveAssetQuantity,
+  getPetExpiryTimestamp,
+  getAssetExpiryDisplayEntries,
+  COMPANION_ITEMS,
+  equipCompanion,
+  updateCompanionSettings
+} from '@/lib/firebaseOperations';
 import { getBadgeForLevel, getNextBadge, getLevelsUntilNextBadge } from '@/lib/badges';
 import {
   AVATAR_ITEMS,
   computeFrameCss,
   needsSvgBorder,
-  makeBorderPoints,
-  BorderStyle
+  makeBorderPoints
 } from '@/lib/avatarItems';
 import { CustomAvatar } from '@/components/CustomAvatar';
 import { formatShortNumber, formatWithCommas } from '@/lib/utils';
@@ -71,6 +86,9 @@ export default function ProfilePage() {
   const [savingStatus, setSavingStatus] = useState(false);
   const [showReceivedGifts, setShowReceivedGifts] = useState(false);
   const [showSentGifts, setShowSentGifts] = useState(false);
+  const [selectedAssetForExpiry, setSelectedAssetForExpiry] = useState<string | null>(null);
+  const [assetExpiryPage, setAssetExpiryPage] = useState(1);
+  const ASSET_EXPIRY_PAGE_SIZE = 10;
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -167,9 +185,10 @@ export default function ProfilePage() {
 
 
   if (!userProfile) return null;
+  const now = Date.now();
 
-  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && userProfile.pets.includes(i.id));
-  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && userProfile.assets.includes(i.id));
+  const ownedPets = STORE_ITEMS.filter(i => i.type === 'pet' && getActivePetIds(userProfile, now).includes(i.id));
+  const ownedAssets = STORE_ITEMS.filter(i => i.type === 'asset' && getActiveAssetIds(userProfile, now).includes(i.id));
   const xpProgress = getXpProgress(userProfile.xp, userProfile.level).percent;
   const badge = getBadgeForLevel(userProfile.level);
   const nextBadge = getNextBadge(userProfile.level);
@@ -181,6 +200,37 @@ export default function ProfilePage() {
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
+
+  const handleEquipCompanion = async (companionId: string) => {
+    if (!userProfile) return;
+    try {
+      const result = await equipCompanion(userProfile.uid, companionId);
+      if (result.success) {
+        toast.success(result.message);
+        refreshProfile();
+      } else {
+        toast.error(result.message);
+      }
+    } catch {
+      toast.error('Failed to equip companion');
+    }
+  };
+
+  const handleToggleCompanionEnabled = async (enabled: boolean) => {
+    if (!userProfile) return;
+    try {
+      await updateCompanionSettings(userProfile.uid, { enabled });
+      refreshProfile();
+    } catch {
+      toast.error('Failed to update companion settings');
+    }
+  };
+
+  const fallbackExpiry = now + (365 * 24 * 60 * 60 * 1000);
+  const formatExpiry = (expiry: number | null | undefined) =>
+    new Date((expiry && Number.isFinite(expiry)) ? expiry : fallbackExpiry).toLocaleDateString();
+  const ownedCompanions = COMPANION_ITEMS.filter((c) => (userProfile.ownedCompanions || []).includes(c.id));
+  const companionSettings = userProfile.companionSettings || { enabled: true, publicReactions: true };
 
 
   return (
@@ -212,7 +262,7 @@ export default function ProfilePage() {
                 className="relative rounded-2xl border border-border/50 bg-background/70 backdrop-blur-xl"
                 >
                 {/* Subtle Gradient Edge */}
-                <div className="absolute inset-0 bg-gradient-to-r from-primary/10 via-transparent to-accent/10 pointer-events-none" />
+                <div className="absolute inset-0 bg-primary/5 pointer-events-none" />
 
                 <div className="relative p-5 md:p-8">
                     <div className="flex flex-col md:flex-row md:items-start gap-6">
@@ -249,7 +299,7 @@ export default function ProfilePage() {
 
                         {/* Username + Roles */}
                         <div className="flex flex-col md:flex-row md:items-center gap-2 md:gap-4 justify-center md:justify-between">
-                        <h1 className="text-2xl font-bold flex items-center justify-center md:justify-start gap-2">
+                        <h1 className="text-2xl font-bold heading-tight flex items-center justify-center md:justify-start gap-2">
                             <Username user={userProfile} />
                         </h1>
 
@@ -291,7 +341,7 @@ export default function ProfilePage() {
                         ) : (
                             <div
                             onClick={() => setEditingStatus(true)}
-                            className="cursor-pointer px-4 py-2 rounded-lg bg-muted/40 hover:bg-muted/60 transition text-sm text-muted-foreground"
+                            className="cursor-pointer px-4 py-2 rounded-lg bg-muted/40 hover:bg-muted/60 transition text-body text-muted-foreground"
                             >
                             {userProfile.statusMessage || 'Tap to set status...'}
                             </div>
@@ -299,30 +349,30 @@ export default function ProfilePage() {
                         </div>
 
                         {/* Meta Info Row */}
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 text-sm text-muted-foreground">
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6 text-body text-muted-foreground">
                         <div className="flex flex-col items-center md:items-start">
-                            <span className="text-xs uppercase tracking-wide">Country</span>
+                            <span className="text-caption uppercase tracking-wide">Country</span>
                             <span className="font-medium text-foreground">
                             {country.flag} {country.name}
                             </span>
                         </div>
 
                         <div className="flex flex-col items-center md:items-start">
-                            <span className="text-xs uppercase tracking-wide">Age</span>
+                            <span className="text-caption uppercase tracking-wide">Age</span>
                             <span className="font-medium text-foreground">
                             {userProfile.age}
                             </span>
                         </div>
 
                         <div className="flex flex-col items-center md:items-start">
-                            <span className="text-xs uppercase tracking-wide">Level</span>
+                            <span className="text-caption uppercase tracking-wide">Level</span>
                             <span className="font-medium text-foreground">
                             {userProfile.level}
                             </span>
                         </div>
 
                         <div className="flex flex-col items-center md:items-start">
-                        <span className="text-xs uppercase tracking-wide">Member Since</span>
+                        <span className="text-caption uppercase tracking-wide">Member Since</span>
                         <span className="font-medium text-foreground">
                             {userProfile.createdAt?.toDate
                             ? userProfile.createdAt.toDate().toLocaleDateString(undefined, {
@@ -346,7 +396,7 @@ export default function ProfilePage() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.1 }}
-              className="p-4 rounded-xl bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20"
+              className="p-4 rounded-xl bg-primary/10 border border-primary/25"
             >
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-2">
@@ -355,12 +405,12 @@ export default function ProfilePage() {
                   </div>
                   <div>
                     <p className="font-semibold">Level {userProfile.level}</p>
-                    <p className="text-xs text-muted-foreground">{userProfile.xp.toLocaleString()} XP</p>
+                    <p className="text-caption text-muted-foreground">{userProfile.xp.toLocaleString()} XP</p>
                   </div>
                 </div>
                 {nextBadge && (
                   <div className="text-right">
-                    <p className="text-xs text-muted-foreground">{levelsUntilNext} levels to</p>
+                    <p className="text-caption text-muted-foreground">{levelsUntilNext} levels to</p>
                     <p className="text-sm">{nextBadge.emoji} {nextBadge.name}</p>
                   </div>
                 )}
@@ -382,7 +432,7 @@ export default function ProfilePage() {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
             >
-              <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <h3 className="font-semibold mb-3 flex items-center gap-2 heading-tight">
                 <Trophy className="w-4 h-4 text-primary" />
                 Statistics
               </h3>
@@ -400,7 +450,7 @@ export default function ProfilePage() {
             </motion.div>
 
             {/* Pets Section */}
-            <h3 className="font-semibold mb-3 flex items-center gap-2">
+            <h3 className="font-semibold mb-3 flex items-center gap-2 heading-tight">
                 <PawPrint className="w-4 h-4 text-primary" />
                 Your Pets
               </h3>
@@ -411,10 +461,13 @@ export default function ProfilePage() {
                     <motion.div
                       key={pet.id}
                       whileHover={{ scale: 1.05, y: -2 }}
-                      className="w-full aspect-square rounded-xl bg-gradient-to-br from-primary/10 to-primary/5 flex flex-col items-center justify-center border border-primary/20"
+                      className="w-full aspect-square rounded-xl bg-primary/10 flex flex-col items-center justify-center border border-primary/20"
                     >
                       <PetAnimation animationData={pet.animationData} size={56} />
-                      <span className="text-xs mt-1 text-muted-foreground">{pet.name}</span>
+                      <span className="text-caption mt-1 text-muted-foreground">{pet.name}</span>
+                      <span className="text-[11px] text-muted-foreground mt-1">
+                        Expires: {formatExpiry(getPetExpiryTimestamp(userProfile, pet.id))}
+                      </span>
                     </motion.div>
                   ))}
                 </div>
@@ -422,7 +475,7 @@ export default function ProfilePage() {
               ) : (
                 <div className="text-center py-6">
                   <PawPrint className="w-10 h-10 mx-auto text-muted-foreground/30 mb-2" />
-                  <p className="text-sm text-muted-foreground mb-3">No pets yet</p>
+                  <p className="text-body text-muted-foreground mb-3">No pets yet</p>
                   <Button variant="outline" size="sm" onClick={() => navigate('/store')}>
                     <Store className="w-4 h-4 mr-1" />
                     Visit Store
@@ -431,20 +484,29 @@ export default function ProfilePage() {
               )}
 
             {/* Assets Section */}
-            <h3 className="font-semibold mb-3 flex items-center gap-2">
+            <h3 className="font-semibold mb-3 flex items-center gap-2 heading-tight">
               <Gem className="w-4 h-4 text-success" />
               Your Assets
             </h3>
               {ownedAssets.length > 0 ? (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
                   {ownedAssets.map((asset) => {
-                    const quantity = userProfile.assetQuantities?.[asset.id] || 1;
+                    const quantity = getActiveAssetQuantity(userProfile, asset.id, now);
+                    const expiryEntries = getAssetExpiryDisplayEntries(userProfile, asset.id, now);
+                    const singleExpiry = quantity === 1 ? expiryEntries[0]?.expiry ?? null : null;
+                    const hasMultiple = quantity > 1;
 
                     return (
                       <motion.div
                         key={asset.id}
                         whileHover={{ scale: 1.05, y: -2 }}
-                        className="relative w-full aspect-square rounded-xl bg-gradient-to-br from-success/10 to-success/5 flex flex-col items-center justify-center border border-success/20"
+                        className={`relative w-full aspect-square rounded-xl bg-success/10 flex flex-col items-center justify-center border border-success/20 ${hasMultiple ? 'cursor-pointer' : ''}`}
+                        onClick={() => {
+                          if (hasMultiple) {
+                            setSelectedAssetForExpiry(asset.id);
+                            setAssetExpiryPage(1);
+                          }
+                        }}
                       >
                         {asset.animationData ? (
                           <PetAnimation animationData={asset.animationData} size={48} />
@@ -452,11 +514,16 @@ export default function ProfilePage() {
                           <span className="text-4xl">{asset.emoji}</span>
                         )}
 
-                        <span className="text-xs mt-1 text-muted-foreground">
+                        <span className="text-caption mt-1 text-muted-foreground">
                           {asset.name}
                         </span>
+                        {quantity === 1 && (
+                          <span className="text-[11px] text-muted-foreground mt-1">
+                            Expires: {formatExpiry(singleExpiry)}
+                          </span>
+                        )}
 
-                        {quantity > 1 && (
+                        {hasMultiple && (
                           <Badge
                             variant="default"
                             className="absolute -top-2 -right-2 h-5 min-w-5 text-xs"
@@ -471,13 +538,103 @@ export default function ProfilePage() {
               ) : (
                 <div className="text-center py-6">
                   <Gem className="w-10 h-10 mx-auto text-muted-foreground/30 mb-2" />
-                  <p className="text-sm text-muted-foreground mb-3">No assets yet</p>
+                  <p className="text-body text-muted-foreground mb-3">No assets yet</p>
                   <Button variant="outline" size="sm" onClick={() => navigate('/store')}>
                     <Store className="w-4 h-4 mr-1" />
                     Visit Store
                   </Button>
                 </div>
               )}
+
+            <h3 className="font-semibold mb-3 heading-tight">Your Companion</h3>
+            <div className="rounded-xl border border-primary/20 bg-primary/10 p-3 space-y-3">
+              {ownedCompanions.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No companion owned yet. Visit Store to buy one.</div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {ownedCompanions.map((companion) => {
+                      const equipped = userProfile.equippedCompanionId === companion.id;
+                      return (
+                        <button
+                          key={companion.id}
+                          type="button"
+                          onClick={() => handleEquipCompanion(companion.id)}
+                          className={`text-left rounded-lg border px-3 py-2 ${equipped ? 'border-success bg-success/10' : 'border-border/60 bg-background/40'}`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium">{companion.emoji} {companion.name}</span>
+                            {equipped ? <span className="text-xs text-success">Equipped</span> : <span className="text-xs text-muted-foreground">Equip</span>}
+                          </div>
+                          <div className="text-xs text-muted-foreground capitalize">{companion.style}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">Companion Enabled</span>
+                    <Switch checked={!!companionSettings.enabled} onCheckedChange={handleToggleCompanionEnabled} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">Public Chatroom Reactions</span>
+                    <Switch checked={!!companionSettings.publicReactions} onCheckedChange={(v) => updateCompanionSettings(userProfile.uid, { publicReactions: v }).then(() => refreshProfile()).catch(() => toast.error('Failed to update companion settings'))} />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <Dialog open={!!selectedAssetForExpiry} onOpenChange={(open) => { if (!open) { setSelectedAssetForExpiry(null); setAssetExpiryPage(1); } }}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>
+                    {selectedAssetForExpiry
+                      ? `${STORE_ITEMS.find((i) => i.id === selectedAssetForExpiry)?.name || 'Asset'} Expiry Dates`
+                      : 'Asset Expiry Dates'}
+                  </DialogTitle>
+                </DialogHeader>
+                {(() => {
+                  const entries = selectedAssetForExpiry
+                    ? [...getAssetExpiryDisplayEntries(userProfile, selectedAssetForExpiry, now)]
+                    : [];
+                  const sortedEntries = entries.sort((a, b) => {
+                    if (a.active !== b.active) return a.active ? -1 : 1;
+                    if (a.expiry == null && b.expiry == null) return 0;
+                    if (a.expiry == null) return 1;
+                    if (b.expiry == null) return -1;
+                    return a.active ? a.expiry - b.expiry : b.expiry - a.expiry;
+                  });
+                  const totalPages = Math.max(1, Math.ceil(sortedEntries.length / ASSET_EXPIRY_PAGE_SIZE));
+                  const currentPage = Math.min(assetExpiryPage, totalPages);
+                  const start = (currentPage - 1) * ASSET_EXPIRY_PAGE_SIZE;
+                  const pageItems = sortedEntries.slice(start, start + ASSET_EXPIRY_PAGE_SIZE);
+                  return (
+                    <>
+                <div className="space-y-2 max-h-[50vh] overflow-y-auto pr-1">
+                  {pageItems.map((entry, idx) => (
+                    <div key={`${selectedAssetForExpiry}-${start + idx}`} className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2 text-sm">
+                      <span>#{start + idx + 1}</span>
+                      <span className={entry.active ? 'text-foreground' : 'text-muted-foreground'}>
+                        {formatExpiry(entry.expiry)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {sortedEntries.length > ASSET_EXPIRY_PAGE_SIZE && (
+                  <div className="mt-3 flex items-center justify-between">
+                    <Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setAssetExpiryPage((p) => Math.max(1, p - 1))}>
+                      Previous
+                    </Button>
+                    <span className="text-xs text-muted-foreground">Page {currentPage} / {totalPages}</span>
+                    <Button size="sm" variant="outline" disabled={currentPage >= totalPages} onClick={() => setAssetExpiryPage((p) => Math.min(totalPages, p + 1))}>
+                      Next
+                    </Button>
+                  </div>
+                )}
+                    </>
+                  );
+                })()}
+              </DialogContent>
+            </Dialog>
 
 
             {/* Logout Button */}
@@ -499,20 +656,20 @@ export default function ProfilePage() {
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className="p-4 rounded-xl bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20"
+              className="p-4 rounded-xl bg-primary/10 border border-primary/25"
             >
               <Coins className="w-12 h-12 mx-auto mb-2 text-success" />
               <p className="text-center text-muted-foreground mb-2">Current Balance</p>
               <h2 className="text-3xl text-center font-bold text-success">{formatWithCommas(userProfile.credits)}</h2>
-              <p className="text-xs text-muted-foreground mt-1 text-center">{formatWithCommas(userProfile.credits)} USD </p>
+              <p className="text-caption text-muted-foreground mt-1 text-center">{formatWithCommas(userProfile.credits)} USD </p>
             </motion.div>
 
             <VoucherRedeem />
 
 
             {/* Transfer Section with username confirmation */}
-            <div className="p-4 rounded-xl bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20">
-              <h3 className="font-semibold mb-3 flex items-center gap-2">
+            <div className="p-4 rounded-xl bg-primary/10 border border-primary/25">
+              <h3 className="font-semibold mb-3 flex items-center gap-2 heading-tight">
                 <Send className="w-4 h-4 text-accent" />
                 Transfer Credits
               </h3>
@@ -555,8 +712,8 @@ export default function ProfilePage() {
             </div>
 
             {/* Transaction History */}
-            <div className="p-4 rounded-xl bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20 overflow-hidden">
-              <div className="p-4 border-b border-white/5">
+            <div className="p-4 rounded-xl bg-primary/10 border border-primary/25 overflow-hidden">
+              <div className="p-4 border-b border-border/60">
                 <h3 className="font-semibold flex items-center gap-2">
                   <History className="w-4 h-4 text-primary" />
                   Transaction History
@@ -573,7 +730,7 @@ export default function ProfilePage() {
                     <p>No transactions yet</p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-white/5">
+                  <div className="divide-y divide-border/60">
                     {transactions.slice(0, visibleCount).map((tx, i) => {
                       const isOutgoing = tx.from === userProfile.uid;
                       return (
@@ -585,7 +742,7 @@ export default function ProfilePage() {
                             <p className="text-sm font-medium truncate">
                               {tx.description || tx.type}
                             </p>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-caption text-muted-foreground">
                               {formatDate(tx.timestamp)}
                             </p>
                             <span className={`font-semibold ${isOutgoing ? 'text-destructive' : 'text-success'}`}>
@@ -600,8 +757,8 @@ export default function ProfilePage() {
 
                 )}
               </ScrollArea>
-              <div className="p-3 border-t border-white/5 flex items-center justify-between">
-                <p className="text-sm text-muted-foreground">
+              <div className="p-3 border-t border-border/60 flex items-center justify-between">
+                <p className="text-body text-muted-foreground">
                   Showing {Math.min(visibleCount, transactions.length)} of {transactions.length}
                 </p>
                 <div className="flex items-center gap-2">
@@ -640,7 +797,7 @@ export default function ProfilePage() {
                 </div>
 
               </div>
-              <p className="text-sm text-muted-foreground mt-4">Click items below to equip/unequip</p>
+              <p className="text-body text-muted-foreground mt-4">Click items below to equip/unequip</p>
             </motion.div>
 
             {/* Owned Avatar Items by Category */}
@@ -663,8 +820,8 @@ export default function ProfilePage() {
               };
 
               return (
-                <div key={type} className="p-4 rounded-xl bg-gradient-to-r from-primary/10 to-primary/5 border border-primary/20">
-                  <h3 className="font-semibold mb-3">{labelMap[type] || type}</h3>
+                <div key={type} className="p-4 rounded-xl bg-primary/10 border border-primary/25">
+                  <h3 className="font-semibold mb-3 heading-tight">{labelMap[type] || type}</h3>
                   <div className="flex flex-wrap gap-2 grid grid-cols-5">
                     {ownedItems.map((item) => (
                       <motion.button
@@ -675,17 +832,23 @@ export default function ProfilePage() {
                         className={`relative w-14 h-14 rounded-xl flex items-center justify-center text-2xl border-2 transition-colors ${
                           equipped === item.id
                             ? 'border-primary bg-primary/20'
-                            : 'border-white/10 bg-secondary/50 hover:border-primary/50'
-                        } ${item.type === 'frame' ? computeFrameCss(item, 2).className || '' : ''}`}
+                            : 'border-border/70 bg-secondary/50 hover:border-primary/50'
+                        } ${
+                          item.type === 'frame'
+                            ? isRectFrameStyle(item.borderStyle)
+                              ? 'rounded-lg'
+                              : 'rounded-full'
+                            : ''
+                        } ${item.type === 'frame' ? computeFrameCss(item, 2, '#000000').className || '' : ''}`}
                         style={
                           item.type === 'background'
                             ? { background: item.cssValue }
                             : item.type === 'frame'
-                            ? computeFrameCss(item, 2).style
+                            ? computeFrameCss(item, 2, '#000000').style
                             : undefined
                         }
                       >
-                        {item.type === 'frame' && needsSvgBorder(item.borderStyle) && item.cssValue && (
+                        {item.type === 'frame' && needsSvgBorder(item.borderStyle) && (
                           <svg
                             className="absolute inset-0 w-full h-full pointer-events-none"
                             viewBox="0 0 100 100"
@@ -693,7 +856,7 @@ export default function ProfilePage() {
                             <polygon
                               points={makeBorderPoints(item.borderStyle)}
                               fill="none"
-                              stroke={item.cssValue}
+                              stroke="#000000"
                               strokeWidth="2"
                               strokeLinejoin="miter"
                             />
@@ -721,3 +884,9 @@ export default function ProfilePage() {
     </NewAppLayout>
   );
 }
+
+function isRectFrameStyle(style?: string): boolean {
+  return style === 'square'
+    || style === 'rounded-rectangle';
+}
+

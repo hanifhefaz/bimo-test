@@ -1,4 +1,4 @@
-import {
+﻿import {
   collection,
   doc,
   getDoc,
@@ -20,17 +20,230 @@ import {
   runTransaction,
   writeBatch
 } from 'firebase/firestore';
-import { ref, push, onValue, off, set, remove, serverTimestamp as rtdbServerTimestamp } from 'firebase/database';
+import { ref, push, onValue, off, set, remove, onChildAdded, onChildChanged, onChildRemoved, serverTimestamp as rtdbServerTimestamp } from 'firebase/database';
 import { db, rtdb, storage } from './firebase';
 import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { COUNTRIES } from './countries';
 import { UserProfile } from '@/contexts/AuthContext';
+import { isEmail } from './utils';
 
 // Simple in-memory cache for user profiles to reduce repetitive reads.
 // Entries expire after USER_CACHE_TTL milliseconds.
 const userCache: Map<string, UserProfile> = new Map();
 const userCacheTimestamps: Map<string, number> = new Map();
 const USER_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const ITEM_EXPIRY_MS = 365 * 24 * 60 * 60 * 1000;
+
+export type DailyMissionId =
+  | 'playMiniGames'
+  | 'winMiniGames'
+  | 'sendGiftToFriend'
+  | 'feedFriendPet'
+  | 'visitRooms'
+  | 'addNewFriend'
+  | 'likeUserProfile';
+
+export type DailyMissionAction =
+  | 'play_mini_game'
+  | 'win_mini_game'
+  | 'send_gift_to_friend'
+  | 'feed_friend_pet'
+  | 'visit_room'
+  | 'add_friend'
+  | 'like_profile';
+
+export interface DailyMissionTaskProgress {
+  progress: number;
+  target: number;
+  xp: number;
+  completed: boolean;
+  rewarded: boolean;
+}
+
+export interface DailyMissionState {
+  resetAt: number;
+  updatedAt: number;
+  allCompleted: boolean;
+  allCompletedRewarded: boolean;
+  roomsVisitedToday: string[];
+  missions: Record<DailyMissionId, DailyMissionTaskProgress>;
+}
+
+const DAILY_MISSION_RESET_MS = 24 * 60 * 60 * 1000;
+const DAILY_MISSION_COMPLETION_BONUS_XP = 100;
+const DAILY_MISSION_CONFIG: Record<DailyMissionId, { target: number; xp: number }> = {
+  playMiniGames: { target: 2, xp: 100 },
+  winMiniGames: { target: 5, xp: 100 },
+  sendGiftToFriend: { target: 1, xp: 50 },
+  feedFriendPet: { target: 1, xp: 100 },
+  visitRooms: { target: 2, xp: 50 },
+  addNewFriend: { target: 1, xp: 50 },
+  likeUserProfile: { target: 1, xp: 50 }
+};
+
+function createFreshDailyMissionState(nowMs: number = Date.now()): DailyMissionState {
+  const resetAt = nowMs + DAILY_MISSION_RESET_MS;
+  return {
+    resetAt,
+    updatedAt: nowMs,
+    allCompleted: false,
+    allCompletedRewarded: false,
+    roomsVisitedToday: [],
+    missions: {
+      playMiniGames: { progress: 0, target: DAILY_MISSION_CONFIG.playMiniGames.target, xp: DAILY_MISSION_CONFIG.playMiniGames.xp, completed: false, rewarded: false },
+      winMiniGames: { progress: 0, target: DAILY_MISSION_CONFIG.winMiniGames.target, xp: DAILY_MISSION_CONFIG.winMiniGames.xp, completed: false, rewarded: false },
+      sendGiftToFriend: { progress: 0, target: DAILY_MISSION_CONFIG.sendGiftToFriend.target, xp: DAILY_MISSION_CONFIG.sendGiftToFriend.xp, completed: false, rewarded: false },
+      feedFriendPet: { progress: 0, target: DAILY_MISSION_CONFIG.feedFriendPet.target, xp: DAILY_MISSION_CONFIG.feedFriendPet.xp, completed: false, rewarded: false },
+      visitRooms: { progress: 0, target: DAILY_MISSION_CONFIG.visitRooms.target, xp: DAILY_MISSION_CONFIG.visitRooms.xp, completed: false, rewarded: false },
+      addNewFriend: { progress: 0, target: DAILY_MISSION_CONFIG.addNewFriend.target, xp: DAILY_MISSION_CONFIG.addNewFriend.xp, completed: false, rewarded: false },
+      likeUserProfile: { progress: 0, target: DAILY_MISSION_CONFIG.likeUserProfile.target, xp: DAILY_MISSION_CONFIG.likeUserProfile.xp, completed: false, rewarded: false }
+    }
+  };
+}
+
+function normalizeDailyMissionState(raw: any, nowMs: number = Date.now()): DailyMissionState {
+  if (!raw || typeof raw !== 'object') return createFreshDailyMissionState(nowMs);
+  const resetAt = Number(raw.resetAt || 0);
+  if (!Number.isFinite(resetAt) || resetAt <= nowMs) {
+    return createFreshDailyMissionState(nowMs);
+  }
+
+  const state = createFreshDailyMissionState(nowMs);
+  state.resetAt = resetAt;
+  state.updatedAt = Number(raw.updatedAt || nowMs);
+  state.allCompleted = !!raw.allCompleted;
+  state.allCompletedRewarded = !!raw.allCompletedRewarded;
+  state.roomsVisitedToday = Array.isArray(raw.roomsVisitedToday)
+    ? Array.from(new Set(raw.roomsVisitedToday.filter((r: unknown) => typeof r === 'string')))
+    : [];
+
+  for (const key of Object.keys(DAILY_MISSION_CONFIG) as DailyMissionId[]) {
+    const existing = raw.missions?.[key] || {};
+    const target = DAILY_MISSION_CONFIG[key].target;
+    const xp = DAILY_MISSION_CONFIG[key].xp;
+    const progress = Math.max(0, Math.min(target, Number(existing.progress || 0)));
+    state.missions[key] = {
+      progress,
+      target,
+      xp,
+      completed: progress >= target || !!existing.completed,
+      rewarded: !!existing.rewarded
+    };
+  }
+
+  state.allCompleted = Object.values(state.missions).every((m) => m.completed);
+  return state;
+}
+
+function incrementMissionProgress(
+  state: DailyMissionState,
+  missionId: DailyMissionId,
+  amount: number
+): number {
+  const mission = state.missions[missionId];
+  if (!mission || amount <= 0) return 0;
+  const next = Math.min(mission.target, mission.progress + amount);
+  mission.progress = next;
+  const justCompleted = !mission.completed && mission.progress >= mission.target;
+  mission.completed = mission.progress >= mission.target;
+  if (justCompleted && !mission.rewarded) {
+    mission.rewarded = true;
+    return mission.xp;
+  }
+  return 0;
+}
+
+export async function getDailyMissionProgress(userId: string): Promise<DailyMissionState> {
+  const userRef = doc(db, 'users', userId);
+  const snap = await getDoc(userRef);
+  if (!snap.exists()) return createFreshDailyMissionState();
+
+  const data = snap.data() as any;
+  const nowMs = Date.now();
+  const normalized = normalizeDailyMissionState(data.dailyMissions, nowMs);
+  const originalResetAt = Number(data.dailyMissions?.resetAt || 0);
+
+  if (!originalResetAt || originalResetAt <= nowMs) {
+    await updateDoc(userRef, { dailyMissions: normalized });
+    invalidateUserCache(userId);
+  }
+
+  return normalized;
+}
+
+export async function trackDailyMissionAction(
+  userId: string,
+  action: DailyMissionAction,
+  opts?: { amount?: number; roomId?: string }
+): Promise<void> {
+  const userRef = doc(db, 'users', userId);
+  const amount = Math.max(1, Number(opts?.amount || 1));
+
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(userRef);
+      if (!snap.exists()) return { xpAwarded: 0, justCompletedAll: false };
+
+      const data: any = snap.data();
+      const nowMs = Date.now();
+      const state = normalizeDailyMissionState(data.dailyMissions, nowMs);
+      const wasAllCompleted = !!state.allCompleted;
+      let xpAwarded = 0;
+
+      if (action === 'play_mini_game') {
+        xpAwarded += incrementMissionProgress(state, 'playMiniGames', amount);
+      } else if (action === 'win_mini_game') {
+        xpAwarded += incrementMissionProgress(state, 'winMiniGames', amount);
+      } else if (action === 'send_gift_to_friend') {
+        xpAwarded += incrementMissionProgress(state, 'sendGiftToFriend', amount);
+      } else if (action === 'feed_friend_pet') {
+        xpAwarded += incrementMissionProgress(state, 'feedFriendPet', amount);
+      } else if (action === 'add_friend') {
+        xpAwarded += incrementMissionProgress(state, 'addNewFriend', amount);
+      } else if (action === 'like_profile') {
+        xpAwarded += incrementMissionProgress(state, 'likeUserProfile', amount);
+      } else if (action === 'visit_room') {
+        const roomId = (opts?.roomId || '').trim();
+        if (roomId && !state.roomsVisitedToday.includes(roomId)) {
+          state.roomsVisitedToday.push(roomId);
+          xpAwarded += incrementMissionProgress(state, 'visitRooms', 1);
+        }
+      }
+
+      state.allCompleted = Object.values(state.missions).every((m) => m.completed);
+      if (state.allCompleted && !state.allCompletedRewarded) {
+        state.allCompletedRewarded = true;
+        xpAwarded += DAILY_MISSION_COMPLETION_BONUS_XP;
+      }
+      state.updatedAt = nowMs;
+
+      tx.update(userRef, { dailyMissions: state });
+      return { xpAwarded, justCompletedAll: !wasAllCompleted && state.allCompleted };
+    });
+
+    invalidateUserCache(userId);
+    if ((result as any).xpAwarded > 0) {
+      try {
+        await addXP(userId, (result as any).xpAwarded);
+      } catch (e) {
+        console.warn('Failed to award daily mission XP:', e);
+      }
+    }
+    if ((result as any).justCompletedAll) {
+      try {
+        await triggerCompanionEvent(userId, 'daily_mission_all_completed');
+      } catch (e) {
+        console.warn('Failed to trigger companion daily mission completion event:', e);
+      }
+    }
+  } catch (e) {
+    console.warn(`Failed to track daily mission action "${action}" for ${userId}:`, e);
+  }
+}
+
+export async function incrementMiniGameWins(userId: string, amount: number = 1): Promise<void> {
+  await trackDailyMissionAction(userId, 'win_mini_game', { amount });
+}
 
 // helper to invalidate cached user when we know the document was modified
 export function invalidateUserCache(uid: string) {
@@ -75,7 +288,7 @@ export async function getRecommendedUsers(
   if (!currentUser) return [];
 
   const usersRef = collection(db, 'users');
-  const q = query(usersRef, limit(200)); // fetch up to 200 for scoring
+  const q = query(usersRef, limit(60)); // bounded sample to keep recommendation reads cheap
   const snapshot = await getDocs(q);
 
   const candidates = snapshot.docs
@@ -106,7 +319,7 @@ export async function getRecommendedUsers(
 
   const results = scored.slice(0, limitNum).map(s => s.user);
 
-  // Fill with remaining random users if we don’t have enough
+  // Fill with remaining random users if we donâ€™t have enough
   if (results.length < limitNum) {
     const remaining = candidates.filter(c => !results.find(r => r.uid === c.uid));
     for (let i = remaining.length - 1; i > 0; i--) {
@@ -131,8 +344,53 @@ export async function getUserById(uid: string): Promise<UserProfile | null> {
 
   if (!docSnap.exists()) return null;
   const user = { uid: docSnap.id, ...docSnap.data() } as UserProfile;
+
+  // Backfill missing item expiries for legacy users.
+  // Pets/assets without expiry get a fresh 1-year expiry from now.
+  const nowMs = Date.now();
+  const backfillExpiry = nowMs + ITEM_EXPIRY_MS;
+  let needsExpiryBackfill = false;
+
+  const petExpiryMap: Record<string, number> = { ...(user.petExpiryMap || {}) };
+  const uniquePets = Array.from(new Set(user.pets || []));
+  for (const petId of uniquePets) {
+    const expiry = Number(petExpiryMap[petId]);
+    if (!Number.isFinite(expiry) || expiry <= 0) {
+      petExpiryMap[petId] = backfillExpiry;
+      needsExpiryBackfill = true;
+    }
+  }
+
+  const assetExpiryMap: Record<string, number[]> = { ...(user.assetExpiryMap || {}) };
+  const uniqueAssets = Array.from(new Set(user.assets || []));
+  for (const assetId of uniqueAssets) {
+    const qtyRaw = Number(user.assetQuantities?.[assetId]);
+    const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
+    const expiries = normalizeExpiryList(assetExpiryMap[assetId]);
+    if (expiries.length < qty) {
+      for (let i = expiries.length; i < qty; i++) {
+        expiries.push(backfillExpiry);
+      }
+      needsExpiryBackfill = true;
+    }
+    assetExpiryMap[assetId] = expiries;
+  }
+
+  if (needsExpiryBackfill) {
+    try {
+      await updateDoc(docRef, {
+        petExpiryMap,
+        assetExpiryMap
+      });
+      user.petExpiryMap = petExpiryMap;
+      user.assetExpiryMap = assetExpiryMap;
+    } catch (err) {
+      console.warn('Failed to backfill missing item expiries:', err);
+    }
+  }
+
   userCache.set(uid, user);
-  userCacheTimestamps.set(uid, now);
+  userCacheTimestamps.set(uid, Date.now());
   return user;
 }
 
@@ -266,6 +524,116 @@ export async function createUserAlert(userId: string, type: UserAlert['type'], m
   });
 }
 
+export interface EmailInvite {
+  id: string;
+  inviterUid: string;
+  inviterUsername?: string;
+  inviterEmailLower?: string;
+  invitedEmail: string;
+  invitedEmailLower: string;
+  status: 'pending' | 'registered';
+  rewardCredits?: number;
+  registeredUserId?: string;
+  createdAt: any;
+  updatedAt: any;
+  registeredAt?: any;
+}
+
+function normalizeInviteEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+export async function createEmailInvite(
+  inviterUid: string,
+  inviterEmail: string,
+  inviterUsername: string,
+  invitedEmail: string
+): Promise<{ success: boolean; message: string }> {
+  const normalizedInvite = normalizeInviteEmail(invitedEmail);
+  const rawInvite = invitedEmail.trim();
+  if (!isEmail(normalizedInvite)) {
+    return { success: false, message: 'Please enter a valid email address' };
+  }
+
+  const inviterEmailLower = normalizeInviteEmail(inviterEmail || '');
+  if (!inviterEmailLower) {
+    return { success: false, message: 'Your profile email is missing' };
+  }
+  if (normalizedInvite === inviterEmailLower) {
+    return { success: false, message: 'You cannot invite your own email' };
+  }
+
+  // Block invites to emails that already have an account.
+  // Prefer normalized field; keep a fallback for older profiles without emailLower.
+  const usersRef = collection(db, 'users');
+  const byLowerSnap = await getDocs(query(usersRef, where('emailLower', '==', normalizedInvite), limit(1)));
+  if (!byLowerSnap.empty) {
+    return { success: false, message: 'This email is already registered on Bimo33' };
+  }
+  const byRawSnap = await getDocs(query(usersRef, where('email', '==', rawInvite), limit(1)));
+  if (!byRawSnap.empty) {
+    return { success: false, message: 'This email is already registered on Bimo33' };
+  }
+
+  const inviteRef = doc(db, 'emailInvites', normalizedInvite);
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const inviteSnap = await tx.get(inviteRef);
+      if (inviteSnap.exists()) {
+        const existing = inviteSnap.data() as EmailInvite;
+        if (existing.status === 'registered') {
+          return { success: false, message: 'This email already registered on Bimo33' };
+        }
+        if (existing.inviterUid === inviterUid) {
+          return { success: false, message: 'You already invited this email' };
+        }
+        return { success: false, message: 'This email was already invited by another user' };
+      }
+
+      tx.set(inviteRef, {
+        inviterUid,
+        inviterUsername: inviterUsername || '',
+        inviterEmailLower,
+        invitedEmail: invitedEmail.trim(),
+        invitedEmailLower: normalizedInvite,
+        status: 'pending',
+        rewardCredits: 5.00,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      return { success: true, message: 'Invite saved. Share Bimo33 with your friend.' };
+    });
+
+    return result;
+  } catch (error) {
+    console.error('Failed to create email invite:', error);
+    return { success: false, message: 'Failed to save invite. Please try again.' };
+  }
+}
+
+export async function getEmailInvitesByInviter(
+  inviterUid: string,
+  limitNum: number = 50
+): Promise<EmailInvite[]> {
+  const invitesRef = collection(db, 'emailInvites');
+  const q = query(invitesRef, where('inviterUid', '==', inviterUid), limit(limitNum));
+  const snapshot = await getDocs(q);
+
+  const invites = snapshot.docs.map((docSnap) => ({
+    id: docSnap.id,
+    ...docSnap.data(),
+  })) as EmailInvite[];
+
+  invites.sort((a, b) => {
+    const aTs = a.createdAt?.toMillis?.() ?? 0;
+    const bTs = b.createdAt?.toMillis?.() ?? 0;
+    return bTs - aTs;
+  });
+
+  return invites;
+}
+
 // Get alert counts by type
 export async function getAlertCounts(userId: string): Promise<{ likes: number; petFeeds: number; refunds: number; dailyCredits: number; contestWins: number; total: number }> {
   const alerts = await getUnreadAlerts(userId);
@@ -354,6 +722,15 @@ export async function acceptFriendRequest(userId: string, friendId: string): Pro
 
   invalidateUserCache(userId);
   invalidateUserCache(friendId);
+
+  try {
+    await Promise.all([
+      trackDailyMissionAction(userId, 'add_friend'),
+      trackDailyMissionAction(friendId, 'add_friend')
+    ]);
+  } catch (e) {
+    console.warn('Failed to track add_friend mission:', e);
+  }
 }
 
 export async function declineFriendRequest(userId: string, friendId: string): Promise<void> {
@@ -390,6 +767,83 @@ export async function removeFriend(userId: string, friendId: string): Promise<vo
   invalidateUserCache(friendId);
 }
 
+// Block / unblock operations
+export async function blockUser(userId: string, targetUserId: string): Promise<{ success: boolean; message: string }> {
+  if (userId === targetUserId) {
+    return { success: false, message: 'You cannot block yourself' };
+  }
+
+  const user = await getUserById(userId);
+  if (!user) {
+    return { success: false, message: 'User not found' };
+  }
+
+  const blocked = user.blockedUsers || [];
+  if (blocked.includes(targetUserId)) {
+    return { success: false, message: 'User is already blocked' };
+  }
+
+  await updateDoc(doc(db, 'users', userId), {
+    blockedUsers: arrayUnion(targetUserId)
+  });
+  invalidateUserCache(userId);
+  return { success: true, message: 'User blocked' };
+}
+
+export async function unblockUser(userId: string, targetUserId: string): Promise<{ success: boolean; message: string }> {
+  if (userId === targetUserId) {
+    return { success: false, message: 'You cannot unblock yourself' };
+  }
+
+  await updateDoc(doc(db, 'users', userId), {
+    blockedUsers: arrayRemove(targetUserId)
+  });
+  invalidateUserCache(userId);
+  return { success: true, message: 'User unblocked' };
+}
+
+// Charge credits atomically for vote-kick initiation.
+export async function chargeVoteKickFee(userId: string, amount: number = 0.05): Promise<{ success: boolean; message: string }> {
+  if (amount <= 0) return { success: true, message: 'No charge required' };
+
+  const userRef = doc(db, 'users', userId);
+  try {
+    const result = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(userRef);
+      if (!snap.exists()) return { success: false, message: 'User not found' };
+
+      const data: any = snap.data();
+      const currentCredits = Number(data.credits || 0);
+      if (currentCredits < amount) {
+        return { success: false, message: `Insufficient credits. Need ${amount.toFixed(2)}.` };
+      }
+
+      tx.update(userRef, {
+        credits: increment(-amount)
+      });
+
+      const txDocRef = doc(collection(db, 'transactions'));
+      tx.set(txDocRef, {
+        from: userId,
+        to: 'system',
+        participants: txParticipants(userId, 'system'),
+        amount,
+        type: 'purchase',
+        description: 'Vote-kick initiation fee',
+        timestamp: serverTimestamp()
+      });
+
+      return { success: true, message: `Charged ${amount.toFixed(2)} credits` };
+    });
+
+    invalidateUserCache(userId);
+    return result as { success: boolean; message: string };
+  } catch (error) {
+    console.error('Failed to charge vote-kick fee:', error);
+    return { success: false, message: 'Failed to process vote-kick payment' };
+  }
+}
+
 // Credits operations
 export async function updateCredits(userId: string, amount: number): Promise<void> {
   const userRef = doc(db, 'users', userId);
@@ -407,7 +861,7 @@ export interface Transaction {
   to: string;
   toUsername?: string;
   amount: number;
-  type: 'transfer' | 'gift' | 'purchase' | 'game' | 'daily' | 'merchant' | 'refund' | 'boost' | 'credits_pack' | 'level' | 'redeem' | 'redeem_reward' | 'gift_conversion';
+  type: 'transfer' | 'gift' | 'purchase' | 'game' | 'daily' | 'merchant' | 'refund' | 'boost' | 'credits_pack' | 'level' | 'redeem' | 'redeem_reward' | 'gift_conversion' | 'invite_bonus';
   description?: string;
   // Optional metadata for gifts and showers
   giftId?: string;
@@ -448,10 +902,10 @@ export interface XPBoost {
 }
 
 export const XP_BOOSTS: XPBoost[] = [
-  { id: 'boost_1h_2x', name: '2x XP (1h)', multiplier: 2, durationHours: 1, price: 0.10, emoji: '⚡' },
-  { id: 'boost_1h_3x', name: '3x XP (1h)', multiplier: 3, durationHours: 1, price: 0.20, emoji: '⚡' },
-  { id: 'boost_24h_2x', name: '2x XP (24h)', multiplier: 2, durationHours: 24, price: 0.5, emoji: '🔥' },
-  { id: 'boost_24h_3x', name: '3x XP (24h)', multiplier: 3, durationHours: 24, price: 0.75, emoji: '🔥' },
+  { id: 'boost_1h_2x', name: '2x XP (1h)', multiplier: 2, durationHours: 1, price: 0.50, emoji: '⚡' },
+  { id: 'boost_1h_3x', name: '3x XP (1h)', multiplier: 3, durationHours: 1, price: 0.90, emoji: '⚡' },
+  { id: 'boost_24h_2x', name: '2x XP (24h)', multiplier: 2, durationHours: 24, price: 4.00, emoji: '🔥' },
+  { id: 'boost_24h_3x', name: '3x XP (24h)', multiplier: 3, durationHours: 24, price: 7.50, emoji: '🔥' },
 ];
 
 // Purchase a credit pack and automatically assign merchant/mentor roles for specific packs
@@ -584,8 +1038,8 @@ export async function sellPackToUser(adminId: string, packId: string, targetUser
 
 export async function getTransactionHistory(userId: string, limitNum: number = 100): Promise<Transaction[]> {
   // Use a single indexed query on participants to avoid multiple full-collection reads.
-  // We apply additional filtering in‑memory so that callers only see entries that actually
-  // involve the user and that contain a non‑zero credit amount. Some legacy/edge
+  // We apply additional filtering inâ€‘memory so that callers only see entries that actually
+  // involve the user and that contain a nonâ€‘zero credit amount. Some legacy/edge
   // transactions (e.g. xp-only events) might slip through otherwise.
   const ref = collection(db, 'transactions');
   const q = query(
@@ -611,64 +1065,44 @@ export async function getTransactionHistory(userId: string, limitNum: number = 1
  */
 export async function getGiftsReceived(userId: string, limitNum: number = 20, cursorTimestamp?: number): Promise<{ gifts: Transaction[]; lastTimestamp?: number }> {
   const refCol = collection(db, 'transactions');
-
-  // Fetch a reasonable window of candidate docs (avoid compound indexes by not ordering in query)
-  const q1 = query(refCol, where('participants', 'array-contains', userId), limit(500));
-  const q2 = query(refCol, where('to', '==', userId), limit(500));
-
-  const [snap1, snap2] = await Promise.all([getDocs(q1), getDocs(q2)]);
-
-  // Merge docs and dedupe by id
-  const docMap = new Map<string, any>();
-  snap1.docs.forEach(d => docMap.set(d.id, d));
-  snap2.docs.forEach(d => docMap.set(d.id, d));
-
-  let allDocs = Array.from(docMap.values());
-
-  // Filter only gift transactions
-  allDocs = allDocs.filter(d => d.data().type === 'gift');
-
-  // Convert to JS objects with timestamp ms
-  let withTs = allDocs.map(d => {
-    const raw = d.data();
-    const ts = raw.timestamp?.toMillis ? raw.timestamp.toMillis() : (typeof raw.timestamp === 'number' ? raw.timestamp : Date.now());
-    return { snap: d, raw, ts };
-  });
-
-  // If cursor provided, filter for older items
+  const pageSize = Math.max(limitNum * 2, 20);
+  const baseParticipants = [
+    where('participants', 'array-contains', userId),
+    where('type', '==', 'gift'),
+    orderBy('timestamp', 'desc'),
+    limit(pageSize),
+  ] as any[];
+  const baseTo = [
+    where('to', '==', userId),
+    where('type', '==', 'gift'),
+    orderBy('timestamp', 'desc'),
+    limit(pageSize),
+  ] as any[];
   if (cursorTimestamp) {
-    withTs.sort((a, b) => b.ts - a.ts);
-    withTs = withTs.filter(x => x.ts < cursorTimestamp);
+    baseParticipants.splice(3, 0, startAfter(Timestamp.fromMillis(cursorTimestamp)));
+    baseTo.splice(3, 0, startAfter(Timestamp.fromMillis(cursorTimestamp)));
   }
 
-  // Sort by timestamp desc
-  withTs.sort((a, b) => b.ts - a.ts);
+  const [snap1, snap2] = await Promise.all([
+    getDocs(query(refCol, ...baseParticipants)),
+    getDocs(query(refCol, ...baseTo)),
+  ]);
 
-  // Fallback: if we found no gifts via participants/to queries, try scanning recent gifts globally
-  if (withTs.length === 0) {
-    try {
-      const qAll = query(refCol, where('type', '==', 'gift'), orderBy('timestamp', 'desc'), limit(100));
-      const snapAll = await getDocs(qAll);
-      const recent = snapAll.docs
-        .map(d => ({ snap: d, raw: d.data(), ts: d.data().timestamp?.toMillis ? d.data().timestamp.toMillis() : (typeof d.data().timestamp === 'number' ? d.data().timestamp : Date.now()) }))
-        .filter(x => {
-          // include if recipient is user or participants contains user
-          const toId = x.raw.to;
-          const parts = x.raw.participants || [];
-          return toId === userId || (Array.isArray(parts) && parts.includes(userId));
-        });
+  const docMap = new Map<string, any>();
+  snap1.docs.forEach((d) => docMap.set(d.id, d));
+  snap2.docs.forEach((d) => docMap.set(d.id, d));
 
-      withTs = recent;
-    } catch (e) {
-      // ignore fallback errors
-      console.warn('Fallback gift scan failed:', e);
-    }
-  }
+  const sorted = Array.from(docMap.values())
+    .map((d) => {
+      const raw = d.data();
+      const ts = raw.timestamp?.toMillis ? raw.timestamp.toMillis() : 0;
+      return { snap: d, raw, ts };
+    })
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, limitNum);
 
-  const sliced = withTs.slice(0, limitNum);
-  const gifts = sliced.map(s => ({ id: s.snap.id, ...s.raw } as Transaction));
-  const lastTimestamp = sliced.length > 0 ? sliced[sliced.length - 1].ts : undefined;
-
+  const gifts = sorted.map((s) => ({ id: s.snap.id, ...s.raw } as Transaction));
+  const lastTimestamp = sorted.length > 0 ? sorted[sorted.length - 1].ts : undefined;
   return { gifts, lastTimestamp };
 }
 
@@ -677,45 +1111,25 @@ export async function getGiftsReceived(userId: string, limitNum: number = 20, cu
  */
 export async function getGiftsSent(userId: string, limitNum: number = 20, cursorTimestamp?: number): Promise<{ gifts: Transaction[]; lastTimestamp?: number }> {
   const refCol = collection(db, 'transactions');
+  const constraints: any[] = [
+    where('from', '==', userId),
+    where('type', '==', 'gift'),
+    orderBy('timestamp', 'desc'),
+    limit(limitNum),
+  ];
+  if (cursorTimestamp) {
+    constraints.splice(3, 0, startAfter(Timestamp.fromMillis(cursorTimestamp)));
+  }
 
-  // Fetch candidate docs (from sender)
-  const q = query(refCol, where('from', '==', userId), limit(500));
-  const snap = await getDocs(q);
-
-  let docs = snap.docs.filter(d => d.data().type === 'gift');
-
-  let withTs = docs.map(d => {
+  const snap = await getDocs(query(refCol, ...constraints));
+  const withTs = snap.docs.map((d) => {
     const raw = d.data();
-    const ts = raw.timestamp?.toMillis ? raw.timestamp.toMillis() : (typeof raw.timestamp === 'number' ? raw.timestamp : Date.now());
+    const ts = raw.timestamp?.toMillis ? raw.timestamp.toMillis() : 0;
     return { snap: d, raw, ts };
   });
 
-  if (cursorTimestamp) {
-    withTs.sort((a, b) => b.ts - a.ts);
-    withTs = withTs.filter(x => x.ts < cursorTimestamp);
-  }
-
-  withTs.sort((a, b) => b.ts - a.ts);
-
-  // Fallback: try a recent global scan if no results
-  if (withTs.length === 0) {
-    try {
-      const qAll = query(refCol, where('type', '==', 'gift'), orderBy('timestamp', 'desc'), limit(200));
-      const snapAll = await getDocs(qAll);
-      const recent = snapAll.docs
-        .map(d => ({ snap: d, raw: d.data(), ts: d.data().timestamp?.toMillis ? d.data().timestamp.toMillis() : (typeof d.data().timestamp === 'number' ? d.data().timestamp : Date.now()) }))
-        .filter(x => x.raw.from === userId);
-
-      withTs = recent;
-    } catch (e) {
-      console.warn('Fallback gift scan failed for sent gifts:', e);
-    }
-  }
-
-  const sliced = withTs.slice(0, limitNum);
-  const gifts = sliced.map(s => ({ id: s.snap.id, ...s.raw } as Transaction));
-  const lastTimestamp = sliced.length > 0 ? sliced[sliced.length - 1].ts : undefined;
-
+  const gifts = withTs.map((s) => ({ id: s.snap.id, ...s.raw } as Transaction));
+  const lastTimestamp = withTs.length > 0 ? withTs[withTs.length - 1].ts : undefined;
   return { gifts, lastTimestamp };
 }
 
@@ -965,6 +1379,8 @@ export interface ChatMessage {
   senderIsAdmin?: boolean;
   senderIsChatAdmin?: boolean;
   senderIsStaff?: boolean; // internal staff flag
+  mentionUserIds?: string[];
+  mentionUsernames?: string[];
   content: string;
   type: 'message' | 'system' | 'gift' | 'game' | 'action';
   timestamp: number;
@@ -981,16 +1397,48 @@ export function sendMessage(roomId: string, message: Omit<ChatMessage, 'id' | 't
 
 export function subscribeToMessages(roomId: string, callback: (messages: ChatMessage[]) => void): () => void {
   const messagesRef = ref(rtdb, `messages/${roomId}`);
+  const messageMap = new Map<string, ChatMessage>();
+  let emitQueued = false;
 
-  const handler = onValue(messagesRef, (snapshot) => {
-    const messages: ChatMessage[] = [];
-    snapshot.forEach((child) => {
-      messages.push({ id: child.key!, ...child.val() });
+  const emit = () => {
+    const messages = Array.from(messageMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+    callback(messages);
+  };
+
+  const queueEmit = () => {
+    if (emitQueued) return;
+    emitQueued = true;
+    queueMicrotask(() => {
+      emitQueued = false;
+      emit();
     });
-    callback(messages.sort((a, b) => a.timestamp - b.timestamp));
+  };
+
+  callback([]);
+
+  const unsubAdded = onChildAdded(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.set(snapshot.key, { id: snapshot.key, ...snapshot.val() });
+    queueEmit();
   });
 
-  return () => off(messagesRef);
+  const unsubChanged = onChildChanged(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.set(snapshot.key, { id: snapshot.key, ...snapshot.val() });
+    queueEmit();
+  });
+
+  const unsubRemoved = onChildRemoved(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.delete(snapshot.key);
+    queueEmit();
+  });
+
+  return () => {
+    unsubAdded();
+    unsubChanged();
+    unsubRemoved();
+  };
 }
 
 // Private messages
@@ -1032,16 +1480,225 @@ export async function clearUnreadMessages(userId: string, conversationId: string
 
 export function subscribeToPrivateMessages(conversationId: string, callback: (messages: ChatMessage[]) => void): () => void {
   const messagesRef = ref(rtdb, `privateMessages/${conversationId}`);
+  const messageMap = new Map<string, ChatMessage>();
+  let emitQueued = false;
 
-  const handler = onValue(messagesRef, (snapshot) => {
-    const messages: ChatMessage[] = [];
-    snapshot.forEach((child) => {
-      messages.push({ id: child.key!, roomId: conversationId, ...child.val() });
+  const emit = () => {
+    const messages = Array.from(messageMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+    callback(messages);
+  };
+
+  const queueEmit = () => {
+    if (emitQueued) return;
+    emitQueued = true;
+    queueMicrotask(() => {
+      emitQueued = false;
+      emit();
     });
-    callback(messages.sort((a, b) => a.timestamp - b.timestamp));
+  };
+
+  callback([]);
+
+  const unsubAdded = onChildAdded(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.set(snapshot.key, { id: snapshot.key, roomId: conversationId, ...snapshot.val() });
+    queueEmit();
   });
 
-  return () => off(messagesRef);
+  const unsubChanged = onChildChanged(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.set(snapshot.key, { id: snapshot.key, roomId: conversationId, ...snapshot.val() });
+    queueEmit();
+  });
+
+  const unsubRemoved = onChildRemoved(messagesRef, (snapshot) => {
+    if (!snapshot.key) return;
+    messageMap.delete(snapshot.key);
+    queueEmit();
+  });
+
+  return () => {
+    unsubAdded();
+    unsubChanged();
+    unsubRemoved();
+  };
+}
+
+export type CompanionTriggerType =
+  | 'mini_game_win'
+  | 'mini_game_loss'
+  | 'win_streak_2plus'
+  | 'daily_mission_all_completed'
+  | 'rare_reward_obtained'
+  | 'high_price_gift_received'
+  | 'high_amount_game_win'
+  | 'asset_profit_collected'
+  | 'pet_fed_by_friend';
+
+const COMPANION_UNIVERSAL_COOLDOWN_MS = 5 * 60 * 1000;
+const HIGH_PRICE_GIFT_THRESHOLD = 5;
+const HIGH_GAME_WIN_THRESHOLD = 10;
+const COMPANION_TRIGGER_COOLDOWN_MS: Record<CompanionTriggerType, number> = {
+  mini_game_win: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  mini_game_loss: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  win_streak_2plus: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  daily_mission_all_completed: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  rare_reward_obtained: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  high_price_gift_received: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  high_amount_game_win: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  asset_profit_collected: COMPANION_UNIVERSAL_COOLDOWN_MS,
+  pet_fed_by_friend: COMPANION_UNIVERSAL_COOLDOWN_MS,
+};
+
+const PUBLIC_COMPANION_TRIGGERS = new Set<CompanionTriggerType>([
+  'win_streak_2plus',
+  'daily_mission_all_completed',
+  'rare_reward_obtained',
+  'high_price_gift_received',
+  'high_amount_game_win',
+]);
+
+const COMPANION_LINES: Record<string, Record<CompanionTriggerType, string[]>> = {
+  wolf_alpha: {
+    mini_game_win: ['That win was clean. Keep cooking.'],
+    mini_game_loss: ['Plot twist. Queue the comeback arc.'],
+    win_streak_2plus: ['Streak {streak}. Somebody check the room temperature, you are on fire.'],
+    daily_mission_all_completed: ['Daily missions done. Discipline looks good on you.'],
+    rare_reward_obtained: ['Rare drop secured. Your luck just got audited.'],
+    high_price_gift_received: ['Big gift received. You are expensive now.'],
+    high_amount_game_win: ['Heavy win: {amount}. Wallet doing cardio.'],
+    asset_profit_collected: ['Profits collected. Passive income says hello.'],
+    pet_fed_by_friend: ['Your pet got fed. Teamwork buff activated.'],
+  },
+  owl_sage: {
+    mini_game_win: ['Excellent decision-making. Keep the rhythm.'],
+    mini_game_loss: ['No panic. Data collected, next round improved.'],
+    win_streak_2plus: ['Streak {streak}. Precision is becoming a habit.'],
+    daily_mission_all_completed: ['All missions complete. Efficient and elegant.'],
+    rare_reward_obtained: ['Rare reward acquired. Timing and preparation aligned.'],
+    high_price_gift_received: ['High-value gift received. Your profile has impact.'],
+    high_amount_game_win: ['High game win: {amount}. Strategy paid in full.'],
+    asset_profit_collected: ['Asset returns collected. Compounding remains undefeated.'],
+    pet_fed_by_friend: ['Your pet was fed by a friend. Strong social signal.'],
+  },
+  fox_trickster: {
+    mini_game_win: ['Smooth win. Very legal, very cool.'],
+    mini_game_loss: ['Character development unlocked.'],
+    win_streak_2plus: ['Streak {streak}. Opponents filing complaints.'],
+    daily_mission_all_completed: ['Missions cleared. Efficiency with style.'],
+    rare_reward_obtained: ['Rare reward! RNG sends its regards.'],
+    high_price_gift_received: ['Premium gift dropped. You are trending.'],
+    high_amount_game_win: ['Huge win: {amount}. Wallet just did a backflip.'],
+    asset_profit_collected: ['Profit collected. Money grew while you blinked.'],
+    pet_fed_by_friend: ['Your pet got a VIP snack from a friend.'],
+  }
+};
+
+function pickCompanionLine(companionId: string, trigger: CompanionTriggerType): string | null {
+  const byCompanion = COMPANION_LINES[companionId];
+  if (!byCompanion) return null;
+  const lines = byCompanion[trigger] || [];
+  if (lines.length === 0) return null;
+  const idx = Math.floor(Math.random() * lines.length);
+  return lines[idx];
+}
+
+function truncateMessage(input: string, limit: number): string {
+  const text = (input || '').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, Math.max(0, limit - 1)).trim()}…`;
+}
+
+export async function triggerCompanionEvent(
+  userId: string,
+  trigger: CompanionTriggerType,
+  opts?: { roomId?: string; itemName?: string; amount?: number; streak?: number; forcePublic?: boolean }
+): Promise<void> {
+  const user = await getUserById(userId);
+  if (!user) return;
+  const settings = user.companionSettings || { enabled: true, publicReactions: true };
+  const equippedCompanionId = user.equippedCompanionId || null;
+  if (!settings.enabled || !equippedCompanionId) return;
+
+  if (trigger === 'high_price_gift_received' && Number(opts?.amount || 0) < HIGH_PRICE_GIFT_THRESHOLD) return;
+  if (trigger === 'high_amount_game_win' && Number(opts?.amount || 0) < HIGH_GAME_WIN_THRESHOLD) return;
+
+  const line = pickCompanionLine(equippedCompanionId, trigger);
+  if (!line) return;
+
+  const companion = COMPANION_ITEMS.find((c) => c.id === equippedCompanionId);
+  const companionLabel = companion ? `${companion.emoji} ${companion.name}` : 'Companion';
+  const now = Date.now();
+  const prevState = user.companionState || {};
+  const triggerTimes = { ...(prevState.lastTriggerAtByType || {}) };
+  let winStreak = Number(prevState.winStreak || 0);
+
+  if (trigger === 'mini_game_win') {
+    winStreak += 1;
+  } else if (trigger === 'mini_game_loss') {
+    winStreak = 0;
+  }
+
+  const lastForTrigger = Number(triggerTimes[trigger] || 0);
+  const isMiniGameTrigger = trigger === 'mini_game_win' || trigger === 'mini_game_loss';
+  const withinTriggerCooldown = now - lastForTrigger < (COMPANION_TRIGGER_COOLDOWN_MS[trigger] || 0);
+  if (!isMiniGameTrigger && withinTriggerCooldown) {
+    return;
+  }
+
+  let shouldSendPublic = !!settings.publicReactions &&
+    (opts?.forcePublic || PUBLIC_COMPANION_TRIGGERS.has(trigger)) &&
+    now - Number(prevState.lastPublicAt || 0) >= COMPANION_UNIVERSAL_COOLDOWN_MS;
+  if (withinTriggerCooldown) {
+    shouldSendPublic = false;
+  }
+
+  const publicRoomId = (opts?.roomId || user.recentRooms?.[0] || '').trim();
+  if (!publicRoomId) shouldSendPublic = false;
+
+  const ownerName = (user.username || 'User').trim();
+  const baseMessage = line
+    .replace('{owner_username}', ownerName)
+    .replace('{item}', opts?.itemName || 'reward')
+    .replace('{amount}', opts?.amount != null ? String(opts.amount) : '')
+    .replace('{streak}', opts?.streak != null ? String(opts.streak) : String(winStreak));
+  const publicMessage = truncateMessage(`${ownerName} ${baseMessage}`, 120);
+
+  if (shouldSendPublic && publicRoomId) {
+    try {
+      const publicPrefix = `${ownerName}'s companion: ${companion?.emoji || '🤖'} ${companion?.name || 'Companion'} — `;
+      sendMessage(publicRoomId, {
+        roomId: publicRoomId,
+        senderId: 'system',
+        senderName: `${ownerName}'s companion`,
+        senderAvatar: companion?.emoji || '🤖',
+        content: `${publicPrefix}${publicMessage}`,
+        type: 'action'
+      });
+      prevState.lastPublicAt = now;
+    } catch (e) {
+      console.warn('Failed to emit companion public reaction:', e);
+    }
+  }
+
+  if (!shouldSendPublic && trigger !== 'mini_game_win' && trigger !== 'mini_game_loss') {
+    return;
+  }
+
+  triggerTimes[trigger] = now;
+  prevState.lastTriggerAtByType = triggerTimes;
+  prevState.winStreak = winStreak;
+
+  try {
+    await updateDoc(doc(db, 'users', userId), { companionState: prevState });
+    invalidateUserCache(userId);
+  } catch (e) {
+    console.warn('Failed to persist companion state:', e);
+  }
+
+  if (trigger === 'mini_game_win' && winStreak >= 2) {
+    await triggerCompanionEvent(userId, 'win_streak_2plus', { roomId: opts?.roomId, forcePublic: true, streak: winStreak });
+  }
 }
 
 // Store items
@@ -1089,35 +1746,50 @@ export interface StoreItem {
   animationData?: any;
 }
 
+export interface CompanionItem {
+  id: string;
+  name: string;
+  emoji: string;
+  price: number;
+  style: 'hype' | 'calm' | 'playful';
+  description: string;
+  // optional Lottie animation data (local JSON import or remote URL string)
+  animationData?: any;
+}
+
 export const STORE_ITEMS: StoreItem[] = [
   // Pets (animals)
-  { id: 'rooster', name: 'Rooster', type: 'pet', power: 1, price: priceFromPower(1), emoji: '', description: 'Bright and loud', animationData: roosterAnim },
-  { id: 'dog', name: 'Dog', type: 'pet', power: 2, price: priceFromPower(2), emoji: '', description: 'A loyal companion', animationData: dogAnim },
-  { id: 'rabbit', name: 'Rabbit', type: 'pet', power: 3, price: priceFromPower(4), emoji: '', description: 'Soft and energetic', animationData: rabbitAnim },
-  { id: 'turtle', name: 'Turtle', type: 'pet', power: 4, price: priceFromPower(6), emoji: '', description: 'Slow but resilient', animationData: turtleAnim },
-  { id: 'chimpanzee', name: 'Chimpanzee', type: 'pet', power: 5, price: priceFromPower(10), emoji: '', description: 'Curious and playful', animationData: chimpAnim },
-  { id: 'racehorse', name: 'Racehorse', type: 'pet', power: 6, price: priceFromPower(20), emoji: '', description: 'Fast and elegant', animationData: racehorseAnim },
-  { id: 'snake', name: 'Snake', type: 'pet', power: 7, price: priceFromPower(40), emoji: '', description: 'Sly and swift', animationData: snakeAnim },
-  { id: 'owl', name: 'Owl', type: 'pet', power: 8, price: priceFromPower(50), emoji: '', description: 'Wise and silent', animationData: owlAnim },
-  { id: 'ox', name: 'Ox', type: 'pet', power: 12, price: priceFromPower(70), emoji: '', description: 'Strong and steady', animationData: oxAnim },
-  { id: 'tiger', name: 'Tiger', type: 'pet', power: 18, price: priceFromPower(80), emoji: '', description: 'Strong and fierce', animationData: tigerAnim },
-  { id: 'unicorn', name: 'Unicorn', type: 'pet', power: 30, price: priceFromPower(120), emoji: '', description: 'Magical and rare', animationData: unicornAnim },
-  { id: 't-rex', name: 'T-Rex', type: 'pet', power: 50, price: priceFromPower(150), emoji: '', description: 'An ancient apex predator', animationData: tRexAnim },
-  { id: 'whale', name: 'Whale', type: 'pet', power: 70, price: priceFromPower(200), emoji: '', description: 'Massive and majestic', animationData: whaleAnim },
-  // Assets (transportation)
+  { id: 'rooster', name: 'Rooster', type: 'pet', power: 1, price: priceFromPower(1), emoji: '🐓', description: 'Bright and loud', animationData: roosterAnim },
+  { id: 'dog', name: 'Dog', type: 'pet', power: 2, price: priceFromPower(2), emoji: '🐶', description: 'A loyal companion', animationData: dogAnim },
+  { id: 'rabbit', name: 'Rabbit', type: 'pet', power: 3, price: priceFromPower(4), emoji: '🐰', description: 'Soft and energetic', animationData: rabbitAnim },
+  { id: 'turtle', name: 'Turtle', type: 'pet', power: 4, price: priceFromPower(6), emoji: '🐢', description: 'Slow but resilient', animationData: turtleAnim },
+  { id: 'chimpanzee', name: 'Chimpanzee', type: 'pet', power: 5, price: priceFromPower(10), emoji: '🐒', description: 'Curious and playful', animationData: chimpAnim },
+  { id: 'racehorse', name: 'Racehorse', type: 'pet', power: 6, price: priceFromPower(20), emoji: '🐎', description: 'Fast and elegant', animationData: racehorseAnim },
+  { id: 'snake', name: 'Snake', type: 'pet', power: 7, price: priceFromPower(40), emoji: '🐍', description: 'Sly and swift', animationData: snakeAnim },
+  { id: 'owl', name: 'Owl', type: 'pet', power: 8, price: priceFromPower(50), emoji: '🦉', description: 'Wise and silent', animationData: owlAnim },
+  { id: 'ox', name: 'Ox', type: 'pet', power: 12, price: priceFromPower(70), emoji: '🐂', description: 'Strong and steady', animationData: oxAnim },
+  { id: 'tiger', name: 'Tiger', type: 'pet', power: 18, price: priceFromPower(80), emoji: '🐅', description: 'Strong and fierce', animationData: tigerAnim },
+  { id: 'unicorn', name: 'Unicorn', type: 'pet', power: 30, price: priceFromPower(120), emoji: '🦄', description: 'Magical and rare', animationData: unicornAnim },
+  { id: 't-rex', name: 'T-Rex', type: 'pet', power: 50, price: priceFromPower(150), emoji: '🦖', description: 'An ancient apex predator', animationData: tRexAnim },
+  { id: 'whale', name: 'Whale', type: 'pet', power: 70, price: priceFromPower(200), emoji: '🐋', description: 'Massive and majestic', animationData: whaleAnim },
 
+  // Assets (transportation)
   { id: 'skateboard', name: 'Skateboard', type: 'asset', price: 1.00, emoji: '🛹', description: 'Generates 0.02 USD daily', dailyCredits: 0.02, animationData: skateboardAnim },
   { id: 'bicycle', name: 'Bicycle', type: 'asset', price: 1.50, emoji: '🚲', description: 'Generates 0.03 USD daily', dailyCredits: 0.03, animationData: bicycleAnim },
   { id: 'motorcycle', name: 'Motorcycle', type: 'asset', price: 5.00, emoji: '🏍️', description: 'Generates 0.11 USD daily', dailyCredits: 0.11, animationData: motorcycleAnim },
   { id: 'car', name: 'Car', type: 'asset', price: 10.00, emoji: '🚗', description: 'Generates 0.23 USD daily', dailyCredits: 0.23, animationData: carAnim },
-  { id: 'automobile', name: 'Automobile', type: 'asset', price: 15.00, emoji: '🚜', description: 'Generates 0.36 USD daily', dailyCredits: 0.36, animationData: automobileAnim },
-  { id: 'rocket', name: 'Rocket', type: 'asset', price: 20.00, emoji: '🛴', description: 'Generates 0.50 USD daily', dailyCredits: 0.50, animationData: rocketAnim },
+  { id: 'automobile', name: 'Automobile', type: 'asset', price: 15.00, emoji: '🚙', description: 'Generates 0.36 USD daily', dailyCredits: 0.36, animationData: automobileAnim },
+  { id: 'rocket', name: 'Rocket', type: 'asset', price: 20.00, emoji: '🚀', description: 'Generates 0.50 USD daily', dailyCredits: 0.50, animationData: rocketAnim },
   { id: 'helicopter', name: 'Helicopter', type: 'asset', price: 30.00, emoji: '🚁', description: 'Generates 0.78 USD daily', dailyCredits: 0.78, animationData: helicopterAnim },
   { id: 'speedboat', name: 'Speedboat', type: 'asset', price: 50.00, emoji: '🚤', description: 'Generates 1.40 USD daily', dailyCredits: 1.40, animationData: speedboatAnim },
   { id: 'airplane', name: 'Airplane', type: 'asset', price: 100.00, emoji: '✈️', description: 'Generates 2.90 USD daily', dailyCredits: 2.90, animationData: airplaneAnim },
-  { id: 'ufo', name: 'UFO', type: 'asset', price: 200.00, emoji: '🛸', description: 'Generates 6.00 USD daily', dailyCredits: 5.00, animationData: ufoAnim }
+  { id: 'ufo', name: 'UFO', type: 'asset', price: 200.00, emoji: '🛸', description: 'Generates 5.00 USD daily', dailyCredits: 5.00, animationData: ufoAnim }
+];
 
-
+export const COMPANION_ITEMS: CompanionItem[] = [
+  { id: 'wolf_alpha', name: 'Alpha Wolf', emoji: '🐺', price: 12.5, style: 'hype', description: 'A bold companion that hypes your wins.', animationData: dogAnim },
+  { id: 'owl_sage', name: 'Sage Owl', emoji: '🦉', price: 12.5, style: 'calm', description: 'A calm strategist with thoughtful reminders.', animationData: owlAnim },
+  { id: 'fox_trickster', name: 'Trickster Fox', emoji: '🦊', price: 12.5, style: 'playful', description: 'A playful companion with witty reactions.', animationData: rabbitAnim }
 ];
 
 
@@ -1301,6 +1973,129 @@ export async function purchaseEmoticonPack(userId: string, packId: string): Prom
   return { success: true, message: `Purchased ${pack.name}! You can now use these emoticons in chat.` };
 }
 
+export async function purchaseCompanion(userId: string, companionId: string): Promise<{ success: boolean; message: string }> {
+  const companion = COMPANION_ITEMS.find((c) => c.id === companionId);
+  if (!companion) return { success: false, message: 'Companion not found' };
+  const user = await getUserById(userId);
+  if (!user) return { success: false, message: 'User not found' };
+  const owned = user.ownedCompanions || [];
+  if (owned.includes(companionId)) return { success: false, message: 'You already own this companion' };
+  if (user.credits < companion.price) return { success: false, message: 'Insufficient credits' };
+
+  const userRef = doc(db, 'users', userId);
+  const updates: any = {
+    credits: increment(-companion.price),
+    ownedCompanions: arrayUnion(companionId),
+  };
+  if (!user.equippedCompanionId) {
+    updates.equippedCompanionId = companionId;
+  }
+  if (!user.companionSettings) {
+    updates.companionSettings = { enabled: true, publicReactions: true };
+  }
+  if (!user.companionState) {
+    updates.companionState = { lastPublicAt: 0, lastTriggerAtByType: {}, winStreak: 0 };
+  }
+
+  await updateDoc(userRef, updates);
+  invalidateUserCache(userId);
+
+  await addDoc(collection(db, 'transactions'), {
+    from: userId,
+    to: 'system',
+    participants: txParticipants(userId, 'system'),
+    amount: companion.price,
+    type: 'purchase',
+    description: `Purchased companion ${companion.name}`,
+    timestamp: serverTimestamp()
+  });
+  return { success: true, message: `Purchased ${companion.name}!` };
+}
+
+export async function equipCompanion(userId: string, companionId: string): Promise<{ success: boolean; message: string }> {
+  const user = await getUserById(userId);
+  if (!user) return { success: false, message: 'User not found' };
+  const owned = user.ownedCompanions || [];
+  if (!owned.includes(companionId)) return { success: false, message: 'You do not own this companion' };
+  await updateDoc(doc(db, 'users', userId), { equippedCompanionId: companionId });
+  invalidateUserCache(userId);
+  return { success: true, message: 'Companion equipped' };
+}
+
+export async function updateCompanionSettings(
+  userId: string,
+  patch: Partial<{ enabled: boolean; publicReactions: boolean }>
+): Promise<void> {
+  const userRef = doc(db, 'users', userId);
+  const user = await getUserById(userId);
+  const current = user?.companionSettings || { enabled: true, publicReactions: true };
+  await updateDoc(userRef, { companionSettings: { ...current, ...patch } });
+  invalidateUserCache(userId);
+}
+
+function normalizeExpiryList(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0)
+    .sort((a, b) => a - b);
+}
+
+export function getPetExpiryTimestamp(user: Partial<UserProfile> | null | undefined, petId: string): number | null {
+  if (!user || !petId) return null;
+  const expiry = Number((user.petExpiryMap || {})[petId]);
+  return Number.isFinite(expiry) && expiry > 0 ? expiry : null;
+}
+
+export function hasActivePet(user: Partial<UserProfile> | null | undefined, petId: string, now: number = Date.now()): boolean {
+  if (!user || !petId) return false;
+  const expiry = getPetExpiryTimestamp(user, petId);
+  if (expiry !== null) return expiry > now;
+  return Array.isArray(user.pets) && user.pets.includes(petId);
+}
+
+export function getActivePetIds(user: Partial<UserProfile> | null | undefined, now: number = Date.now()): string[] {
+  if (!user || !Array.isArray(user.pets)) return [];
+  return user.pets.filter((petId) => hasActivePet(user, petId, now));
+}
+
+export function getAssetExpiryTimestamps(user: Partial<UserProfile> | null | undefined, assetId: string): number[] {
+  if (!user || !assetId) return [];
+  return normalizeExpiryList((user.assetExpiryMap || {})[assetId]);
+}
+
+export function getActiveAssetQuantity(user: Partial<UserProfile> | null | undefined, assetId: string, now: number = Date.now()): number {
+  if (!user || !assetId) return 0;
+  const expiries = getAssetExpiryTimestamps(user, assetId);
+  if (expiries.length > 0) return expiries.filter((ts) => ts > now).length;
+
+  const qty = Number(user.assetQuantities?.[assetId]);
+  if (Number.isFinite(qty) && qty > 0) return qty;
+  return Array.isArray(user.assets) && user.assets.includes(assetId) ? 1 : 0;
+}
+
+export function getActiveAssetIds(user: Partial<UserProfile> | null | undefined, now: number = Date.now()): string[] {
+  if (!user || !Array.isArray(user.assets)) return [];
+  const uniqueAssetIds = Array.from(new Set(user.assets));
+  return uniqueAssetIds.filter((assetId) => getActiveAssetQuantity(user, assetId, now) > 0);
+}
+
+export function getAssetExpiryDisplayEntries(
+  user: Partial<UserProfile> | null | undefined,
+  assetId: string,
+  now: number = Date.now()
+): Array<{ expiry: number | null; active: boolean }> {
+  if (!user || !assetId) return [];
+  const expiries = getAssetExpiryTimestamps(user, assetId);
+  if (expiries.length > 0) {
+    return expiries.map((expiry) => ({ expiry, active: expiry > now }));
+  }
+
+  const qty = getActiveAssetQuantity(user, assetId, now);
+  if (qty <= 0) return [];
+  return Array.from({ length: qty }, () => ({ expiry: null, active: true }));
+}
+
 // Free chat commands
 export const FREE_COMMANDS: { command: string; action: string; emoji: string }[] = [
   { command: 'hug', action: 'gives a warm hug to everyone', emoji: '🤗' },
@@ -1396,11 +2191,14 @@ export async function purchaseItem(userId: string, itemId: string): Promise<{ su
 
   // Assets can be bought multiple times - don't check for ownership
   if (item.type === 'asset') {
+    const expiryAt = Date.now() + ITEM_EXPIRY_MS;
+    const updatedExpiries = [...getAssetExpiryTimestamps(user, itemId), expiryAt];
     await updateDoc(userRef, {
       credits: increment(-item.price),
       assets: arrayUnion(itemId),
       // Track quantity of owned assets
-      [`assetQuantities.${itemId}`]: increment(1)
+      [`assetQuantities.${itemId}`]: increment(1),
+      [`assetExpiryMap.${itemId}`]: updatedExpiries
     });
     invalidateUserCache(userId);
 
@@ -1420,13 +2218,16 @@ export async function purchaseItem(userId: string, itemId: string): Promise<{ su
 
   // Pets can only be owned once
   const field = 'pets';
-  if ((user[field] as string[]).includes(itemId)) {
+  const now = Date.now();
+  const petExpiry = getPetExpiryTimestamp(user, itemId);
+  if ((user[field] as string[]).includes(itemId) && (petExpiry === null || petExpiry > now)) {
     return { success: false, message: 'You already own this pet' };
   }
 
   await updateDoc(userRef, {
     credits: increment(-item.price),
-    [field]: arrayUnion(itemId)
+    [field]: arrayUnion(itemId),
+    [`petExpiryMap.${itemId}`]: now + ITEM_EXPIRY_MS
   });
   invalidateUserCache(userId);
 
@@ -1462,19 +2263,19 @@ export async function collectDailyCredits(userId: string): Promise<{ success: bo
     }
   }
 
-  // Calculate total credits based on quantity of each asset owned
+  // Calculate total credits based on active (non-expired) assets.
   let totalCredits = 0;
-  for (const assetId of user.assets) {
+  const activeAssetIds = getActiveAssetIds(user, now.getTime());
+  for (const assetId of activeAssetIds) {
     const asset = STORE_ITEMS.find(i => i.id === assetId);
     if (asset && asset.dailyCredits) {
-      // Get quantity from assetQuantities, default to 1 if not set
-      const quantity = user.assetQuantities?.[assetId] || 1;
+      const quantity = getActiveAssetQuantity(user, assetId, now.getTime());
       totalCredits += asset.dailyCredits * quantity;
     }
   }
 
   if (totalCredits === 0) {
-    return { success: false, amount: 0, message: 'No assets to collect from' };
+    return { success: false, amount: 0, message: 'No active assets to collect from' };
   }
 
   const userRef = doc(db, 'users', userId);
@@ -1494,6 +2295,12 @@ export async function collectDailyCredits(userId: string): Promise<{ success: bo
     description: 'Daily asset collection',
     timestamp: serverTimestamp()
   });
+
+  try {
+    await triggerCompanionEvent(userId, 'asset_profit_collected', { amount: totalCredits });
+  } catch (e) {
+    console.warn('Failed to trigger companion asset profit event:', e);
+  }
 
   return { success: true, amount: totalCredits, message: `Collected ${totalCredits} credits!` };
 }
@@ -1517,13 +2324,13 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
     return { success: false, message: 'You must be friends to feed their pets' };
   }
 
-  // Check if owner has the pet
-  if (!owner.pets.includes(petId)) {
+  // Check if owner has an active (non-expired) pet
+  if (!hasActivePet(owner, petId)) {
     return { success: false, message: 'This user does not own this pet' };
   }
 
-  // Check if feeder owns the same pet type - REQUIRED to feed
-  if (!feeder.pets.includes(petId)) {
+  // Check if feeder owns the same active pet type - REQUIRED to feed
+  if (!hasActivePet(feeder, petId)) {
     const pet = STORE_ITEMS.find(i => i.id === petId && i.type === 'pet');
     return { success: false, message: `You need to own a ${pet?.name || 'pet'} to feed this pet` };
   }
@@ -1548,10 +2355,10 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
   const pet = STORE_ITEMS.find(i => i.id === petId && i.type === 'pet');
   const petPrice = pet?.price || 1.0;
 
-  // Random reward: exact value between 3% and 5% of the pet price
-  // we do not round – allow fractional credits since the system supports them
-  const percentage = 0.03 + Math.random() * 0.02; // [0.03,0.05)
-  const reward = petPrice * percentage;
+  // Keep rewards modest to avoid inflation.
+  const ownerPercentage = 0.006 + Math.random() * 0.006; // [0.6%, 1.2%)
+  const ownerReward = Number((petPrice * ownerPercentage).toFixed(2));
+  const feederReward = Number(Math.max(0.01, ownerReward * 0.4).toFixed(2));
 
   // Update daily feeders list
   await setDoc(dailyFeedRef, {
@@ -1563,8 +2370,8 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
 
   const remainingSlots = 5 - currentFeeders.length - 1;
 
-  // 10% chance to win a random asset instead of credits for the feeder
-  const getsAsset = Math.random() < 0.1;
+  // Very rare asset jackpot.
+  const getsAsset = Math.random() < 0.01;
   if (getsAsset) {
     // Pick a random asset from the first five cheapest assets
     const availableAssets = STORE_ITEMS
@@ -1610,13 +2417,26 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
       });
 
       // Owner still gets credits
-      await updateCredits(ownerId, reward);
+      await updateCredits(feederId, feederReward);
+      await updateCredits(ownerId, ownerReward);
+
+      await addDoc(collection(db, 'transactions'), {
+        from: 'system',
+        to: feederId,
+        participants: txParticipants('system', feederId),
+        toUsername: feeder.username,
+        amount: feederReward,
+        type: 'daily',
+        description: `Fed ${owner.username}'s ${pet?.name || 'pet'} (jackpot bonus)`,
+        timestamp: serverTimestamp()
+      });
+
       await addDoc(collection(db, 'transactions'), {
         from: 'system',
         to: ownerId,
         participants: txParticipants('system', ownerId),
-        toUsername: owner.username,
-        amount: reward,
+    toUsername: owner.username,
+    amount: ownerReward,
         type: 'daily',
         description: `${pet?.name || 'Pet'} fed by ${feeder.username}`,
         timestamp: serverTimestamp()
@@ -1626,23 +2446,31 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
       await addDoc(collection(db, 'userAlerts'), {
         userId: ownerId,
         type: 'pet_feed',
-        message: `${feeder.username} fed your ${pet?.name || 'pet'} (+${reward} credits and a ${randomAsset.name})`,
+        message: `${feeder.username} fed your ${pet?.name || 'pet'} (+${ownerReward} credits and a ${randomAsset.name})`,
         read: false,
         createdAt: serverTimestamp()
       });
 
+      try {
+        await triggerCompanionEvent(ownerId, 'pet_fed_by_friend');
+        await triggerCompanionEvent(feederId, 'rare_reward_obtained', { itemName: randomAsset.name });
+        await triggerCompanionEvent(ownerId, 'rare_reward_obtained', { itemName: randomAsset.name });
+      } catch (e) {
+        console.warn('Failed to trigger companion feed jackpot events:', e);
+      }
+
       return {
         success: true,
-        message: `🎉 Lucky! You won a ${randomAsset.name}! Owner also received a ${randomAsset.name} and ${reward} credits. (${remainingSlots} slots left)`,
-        reward,
+        message: `🎉 Lucky! You won a ${randomAsset.name}! Owner also received a ${randomAsset.name} and ${ownerReward} credits. (${remainingSlots} slots left)`,
+        reward: feederReward,
         rewardType: 'asset',
         assetName: randomAsset.name
       };
     }
   }
 
-  await updateCredits(feederId, reward);
-  await updateCredits(ownerId, reward);
+  await updateCredits(feederId, feederReward);
+  await updateCredits(ownerId, ownerReward);
 
   // Record transactions for pet feeding
   await addDoc(collection(db, 'transactions'), {
@@ -1650,7 +2478,7 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
     to: feederId,
     participants: txParticipants('system', feederId),
     toUsername: feeder.username,
-    amount: reward,
+    amount: feederReward,
     type: 'daily',
     description: `Fed ${owner.username}'s ${pet?.name || 'pet'}`,
     timestamp: serverTimestamp()
@@ -1661,7 +2489,7 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
     to: ownerId,
     participants: txParticipants('system', ownerId),
     toUsername: owner.username,
-    amount: reward,
+    amount: ownerReward,
     type: 'daily',
     description: `${pet?.name || 'Pet'} fed by ${feeder.username}`,
     timestamp: serverTimestamp()
@@ -1671,12 +2499,29 @@ export async function feedPet(feederId: string, ownerId: string, petId: string):
   await addDoc(collection(db, 'userAlerts'), {
     userId: ownerId,
     type: 'pet_feed',
-    message: `${feeder.username} fed your ${pet?.name || 'pet'} (+${reward} credits)`,
+    message: `${feeder.username} fed your ${pet?.name || 'pet'} (+${ownerReward} credits)`,
     read: false,
     createdAt: serverTimestamp()
   });
 
-  return { success: true, message: `Fed ${pet?.name || 'pet'}! You both received ${reward} credits! (${remainingSlots} feeding slots left today)`, reward, rewardType: 'credits' };
+  try {
+    await triggerCompanionEvent(ownerId, 'pet_fed_by_friend');
+  } catch (e) {
+    console.warn('Failed to trigger companion pet_fed_by_friend event:', e);
+  }
+
+  try {
+    await trackDailyMissionAction(feederId, 'feed_friend_pet');
+  } catch (e) {
+    console.warn('Failed to track feed_friend_pet mission:', e);
+  }
+
+  return {
+    success: true,
+    message: `Fed ${pet?.name || 'pet'}! You received ${feederReward} and owner received ${ownerReward} credits. (${remainingSlots} feeding slots left today)`,
+    reward: feederReward,
+    rewardType: 'credits'
+  };
 }
 
 // Update gift stats
@@ -1718,6 +2563,22 @@ export async function recordGift(senderId: string, receiverId: string, giftPrice
     giftEmoji: giftEmoji || null,
     timestamp: serverTimestamp()
   });
+
+  if (receiverId && receiverId !== 'all') {
+    try {
+      const sender = await getUserById(senderId);
+      if (sender?.friends?.includes(receiverId)) {
+        await trackDailyMissionAction(senderId, 'send_gift_to_friend');
+      }
+    } catch (e) {
+      console.warn('Failed to track send_gift_to_friend mission (single gift):', e);
+    }
+    try {
+      await triggerCompanionEvent(receiverId, 'high_price_gift_received', { amount: giftPrice, itemName: giftName });
+    } catch (e) {
+      console.warn('Failed to trigger companion high_price_gift_received (single gift):', e);
+    }
+  }
 }
 
 // Record a gift shower (send same gift to multiple recipients) as a single aggregated transaction
@@ -1739,6 +2600,11 @@ export async function recordGiftShower(senderId: string, recipientIds: string[],
       giftsReceived: increment(1),
       unconvertedGifts: increment(giftPrice)
     });
+    try {
+      await triggerCompanionEvent(receiverId, 'high_price_gift_received', { amount: giftPrice, itemName: giftName });
+    } catch (e) {
+      console.warn('Failed to trigger companion high_price_gift_received (gift shower):', e);
+    }
   }
 
   // The old implementation created one aggregated transaction that included all
@@ -1781,6 +2647,17 @@ export async function recordGiftShower(senderId: string, recipientIds: string[],
       giftEmoji,
       timestamp: serverTimestamp()
     });
+  }
+
+  try {
+    const sender = await getUserById(senderId);
+    const friendIds = new Set(sender?.friends || []);
+    const sentToAtLeastOneFriend = recipientIds.some((id) => friendIds.has(id));
+    if (sentToAtLeastOneFriend) {
+      await trackDailyMissionAction(senderId, 'send_gift_to_friend');
+    }
+  } catch (e) {
+    console.warn('Failed to track send_gift_to_friend mission (gift shower):', e);
   }
 }
 
@@ -1979,7 +2856,7 @@ export async function initializeDefaultRooms(): Promise<void> {
 
 // XP and leveling
 export function xpToNext(level: number): number {
-  // Soft exponential curve: XP_to_next = round(100 × 1.12^(level − 1))
+  // Soft exponential curve: XP_to_next = round(100 Ã— 1.12^(level âˆ’ 1))
   return Math.round(100 * Math.pow(1.12, Math.max(0, level - 1)));
 }
 
@@ -2035,7 +2912,7 @@ export async function addXP(userId: string, amount: number): Promise<{ leveledUp
   const updates: any = { xp: newXP, level: newLevel };
 
   if (leveledUp) {
-    // Compute linear credits for each level gained: Credits = 50 + (level × 10)
+    // Compute linear credits for each level gained: Credits = 50 + (level Ã— 10)
     let totalBonusCredits = 0;
     for (let lvl = (user.level || 1) + 1; lvl <= newLevel; lvl++) {
       totalBonusCredits += 0.50 + (lvl * 0.01);
@@ -2086,6 +2963,7 @@ export async function addToRecentRooms(userId: string, roomId: string): Promise<
   const user = await getUserById(userId);
   if (!user) return;
 
+  const previousRecentRooms = user.recentRooms || [];
   let recentRooms = user.recentRooms || [];
   // Remove if already exists and add to front
   recentRooms = recentRooms.filter(id => id !== roomId);
@@ -2093,9 +2971,19 @@ export async function addToRecentRooms(userId: string, roomId: string): Promise<
   // Keep only last 10
   recentRooms = recentRooms.slice(0, 10);
 
+  const unchanged =
+    previousRecentRooms.length === recentRooms.length &&
+    previousRecentRooms.every((id, idx) => id === recentRooms[idx]);
+  if (unchanged) return;
+
   await updateDoc(userRef, { recentRooms });
   invalidateUserCache(userId);
-  invalidateUserCache(userId);
+
+  try {
+    await trackDailyMissionAction(userId, 'visit_room', { roomId });
+  } catch (e) {
+    console.warn('Failed to track visit_room mission:', e);
+  }
 }
 
 // Generic helper to examine a timestamp field and zero counters if more than a week has passed.
@@ -2139,24 +3027,31 @@ async function _transactionalIncrementWeeklyField(
   });
 }
 
-// log each game/redeem event so that we can compute sliding‑window leaderboards
+// log each game/redeem event so that we can compute slidingâ€‘window leaderboards
 async function _recordEvent(userId: string, collectionName: string): Promise<void> {
   try {
     const eventsRef = collection(db, collectionName);
     await addDoc(eventsRef, { userId, timestamp: serverTimestamp() });
+
+    // Maintain a monthly materialized leaderboard to avoid large event scans in UI reads.
+    const monthKey = new Date().toISOString().slice(0, 7); // YYYY-MM (UTC)
+    const kind = collectionName === 'gameEvents' ? 'game' : 'redeem';
+    const aggRef = doc(db, 'leaderboardMonthly', `${kind}_${monthKey}`, 'users', userId);
+    await setDoc(aggRef, { count: increment(1), updatedAt: serverTimestamp() }, { merge: true });
   } catch (e) {
     console.warn(`Failed to log event to ${collectionName} for ${userId}:`, e);
   }
 }
 
 // Increment the weekly games played counter for a user.  If the user is past
-// the one‑week window their counters will be cleared automatically before the
+// the oneâ€‘week window their counters will be cleared automatically before the
 // increment is applied.  This makes the leaderboard robust even if the
 // scheduler didn't run.
 export async function incrementGamesPlayedWeekly(userId: string, amount: number = 1): Promise<void> {
   try {
     await _transactionalIncrementWeeklyField(userId, 'gamesPlayedWeekly', amount);
     _recordEvent(userId, 'gameEvents');
+    await trackDailyMissionAction(userId, 'play_mini_game', { amount });
   } catch (e) {
     console.error(`Failed to increment gamesPlayedWeekly for ${userId}:`, e);
   }
@@ -2187,40 +3082,27 @@ export async function getTopUsersLast7Days(
   kind: 'game' | 'redeem',
   limitNum: number = 5
 ): Promise<UserProfile[]> {
-  const now = Timestamp.now();
-  const weekAgo = Timestamp.fromMillis(now.toMillis() - 7 * 24 * 60 * 60 * 1000);
-  const eventsRef = collection(db, kind === 'game' ? 'gameEvents' : 'redeemEvents');
-  const q = query(eventsRef, where('timestamp', '>=', weekAgo));
-  const snapshot = await getDocs(q);
-
-  const counts: Record<string, number> = {};
-  snapshot.forEach((docSnap) => {
-    const data: any = docSnap.data();
-    const uid = data.userId;
-    counts[uid] = (counts[uid] || 0) + 1;
-  });
-
-  const sorted = Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, limitNum);
-
-  const users = await Promise.all(
-    sorted.map(async ([uid]) => {
-      try {
-        const userDoc = await getDoc(doc(db, 'users', uid));
-        if (userDoc.exists()) return { uid, ...userDoc.data() } as UserProfile;
-      } catch {
-        // ignore
-      }
-      return null;
-    })
+  const monthKey = new Date().toISOString().slice(0, 7); // YYYY-MM (UTC)
+  const q = query(
+    collection(db, 'leaderboardMonthly', `${kind}_${monthKey}`, 'users'),
+    orderBy('count', 'desc'),
+    limit(limitNum)
   );
+  const snapshot = await getDocs(q);
+  if (snapshot.empty) {
+    const usersRef = collection(db, 'users');
+    const fallbackField = kind === 'game' ? 'gamesPlayedWeekly' : 'redeemsThisWeek';
+    const fallbackSnap = await getDocs(query(usersRef, orderBy(fallbackField, 'desc'), limit(limitNum)));
+    return fallbackSnap.docs.map((d) => ({ uid: d.id, ...d.data() } as UserProfile));
+  }
 
-  return users.filter((u): u is UserProfile => u !== null).slice(0, limitNum);
+  const topIds = snapshot.docs.map((d) => d.id);
+  const users = await getUsersByIds(topIds);
+  return users.slice(0, limitNum);
 }
 
 // Reset the weekly counters for every user. Typically invoked by a
-// scheduled/cloud‑function once per week (e.g. Monday UTC).
+// scheduled/cloudâ€‘function once per week (e.g. Monday UTC).
 export async function resetWeeklyLeaderboard(): Promise<void> {
   try {
     const usersRef = collection(db, 'users');
@@ -2240,12 +3122,12 @@ export async function resetWeeklyLeaderboard(): Promise<void> {
   }
 }
 
-// conversion rate for gift value -> credit amount (20%)
-export const GIFT_CONVERSION_RATE = 0.2;
+// conversion rate for gift value -> credit amount (10%)
+export const GIFT_CONVERSION_RATE = 0.1;
 
 // compute how many credits a pending gift amount will convert to
 // apply the configured rate directly and allow fractional results. this
-// makes small gifts (e.g. value 1) still yield 0.2 credits and keeps the
+// makes small gifts still convert while keeping emissions conservative.
 // convert button active for any positive balance.
 export function calculateGiftConversion(amount: number): number {
   if (amount <= 0) return 0;
@@ -2350,11 +3232,28 @@ export async function banUser(adminId: string, targetUserId: string, reason: str
     return { success: false, message: 'Only admins can ban users' };
   }
 
+  // Check if already banned to prevent duplicate bans
+  const target = await getUserById(targetUserId);
+  if (!target) {
+    return { success: false, message: 'User not found' };
+  }
+  if (target.isBanned) {
+    return { success: false, message: 'User is already banned' };
+  }
+
   const targetRef = doc(db, 'users', targetUserId);
   await updateDoc(targetRef, {
     isBanned: true,
     banReason: reason
   });
+  invalidateUserCache(targetUserId);
+
+  // Remove the banned user from all chatrooms immediately
+  try {
+    await removeUserFromAllRooms(targetUserId, true);
+  } catch (e) {
+    console.warn('Failed to remove banned user from rooms:', e);
+  }
 
   return { success: true, message: 'User has been banned' };
 }
@@ -2444,9 +3343,9 @@ export async function calculateDailyLossRefund(userId: string): Promise<{ succes
     return { success: false, refundAmount: 0, message: 'No spending to refund' };
   }
 
-  // 5% refund rate
-  const refundRate = 0.05;
-  const refundAmount = Math.floor(totalSpent * refundRate);
+  // conservative refund rate
+  const refundRate = 0.02;
+  const refundAmount = Number((totalSpent * refundRate).toFixed(2));
 
   if (refundAmount === 0) {
     return { success: false, refundAmount: 0, message: 'Refund amount too small' };
@@ -2477,7 +3376,7 @@ export async function calculateDailyLossRefund(userId: string): Promise<{ succes
     participants: txParticipants('system', userId),
     amount: refundAmount,
     type: 'refund',
-    description: `Daily loss refund (5% of ${totalSpent} spent)`,
+    description: `Daily loss refund (2% of ${totalSpent} spent)`,
     timestamp: serverTimestamp()
   });
 
@@ -2522,6 +3421,12 @@ export async function likeProfile(likerId: string, profileId: string): Promise<{
     read: false,
     createdAt: serverTimestamp()
   });
+
+  try {
+    await trackDailyMissionAction(likerId, 'like_profile');
+  } catch (e) {
+    console.warn('Failed to track like_profile mission:', e);
+  }
 
   return { success: true, message: 'Profile liked!' };
 }
@@ -2585,7 +3490,7 @@ export async function purchaseXPBoost(userId: string, boostId: string): Promise<
 export async function startNewbiesContest(
   adminId: string,
   durationMinutes: number = 60,
-  prizeCredits: number = 1000,
+  prizeCredits: number = 50,
   giftId?: string
 ): Promise<{ success: boolean; message: string }> {
   const admin = await getUserById(adminId);
@@ -2686,6 +3591,23 @@ export function subscribeToRoomParticipants(roomId: string, callback: (participa
 // and marked offline when their `lastActive` timestamp is older than the threshold.
 export async function cleanupStaleUsers(inactiveMs: number = 20 * 60 * 1000): Promise<void> {
   try {
+    // Use a short-lived lock so concurrent clients do not all run full cleanup scans.
+    const lockRef = doc(db, 'metaLocks', 'stalePresenceCleanup');
+    const lockMs = 2 * 60 * 1000;
+    const nowMs = Date.now();
+    const lockAcquired = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(lockRef);
+      const data: any = snap.exists() ? snap.data() : null;
+      const expiresAt = typeof data?.expiresAt === 'number' ? data.expiresAt : 0;
+      if (expiresAt > nowMs) return false;
+      tx.set(lockRef, {
+        expiresAt: nowMs + lockMs,
+        heartbeatAt: nowMs
+      }, { merge: true });
+      return true;
+    });
+    if (!lockAcquired) return;
+
     const cutoff = new Date(Date.now() - inactiveMs);
     const usersRef = collection(db, 'users');
     const q = query(usersRef, where('isOnline', '==', true), where('lastActive', '<', cutoff));
@@ -2725,6 +3647,15 @@ export async function cleanupStaleUsers(inactiveMs: number = 20 * 60 * 1000): Pr
         console.warn('Failed to update Firestore user doc for stale user (may be a security rule):', uid, e);
       }
     }
+
+    try {
+      await setDoc(lockRef, {
+        expiresAt: Date.now() + lockMs,
+        heartbeatAt: Date.now()
+      }, { merge: true });
+    } catch {
+      // ignore lock refresh failures
+    }
   } catch (e) {
     console.error('Failed to cleanup stale users:', e);
   }
@@ -2732,3 +3663,6 @@ export async function cleanupStaleUsers(inactiveMs: number = 20 * 60 * 1000): Pr
 
 // explicit export to ensure TypeScript recognizes the helper across modules
 // export { invalidateUserCache }; // Removed to fix redeclaration error
+
+
+
