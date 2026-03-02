@@ -1124,6 +1124,7 @@ export default function ChatRoomPage() {
           toast.success('Contest started!');
         }
       } catch (error) {
+        console.error('Failed to start gift contest:', error);
         toast.error('Failed to start contest');
       }
       return;
@@ -1149,6 +1150,7 @@ export default function ChatRoomPage() {
           });
         }
       } catch (error) {
+        console.error('Failed to start invite contest:', error);
         toast.error('Failed to start invite contest');
       }
       return;

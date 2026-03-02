@@ -1,0 +1,73 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "status": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['isOnline'])"
+      }
+    },
+
+    "privateMessages": {
+      "$conversationId": {
+        ".read": "auth != null && $conversationId.contains(auth.uid)",
+        "$messageId": {
+          ".write": "auth != null && $conversationId.contains(auth.uid)",
+          ".validate": "newData.hasChildren(['senderId','senderName','content','timestamp']) && newData.child('senderId').val() === auth.uid"
+        }
+      }
+    },
+
+    "messages": {
+      "$roomId": {
+        ".read": "auth != null",
+        "$messageId": {
+          ".write": "auth != null",
+          ".validate": "newData.hasChildren(['senderId','senderName','content','timestamp']) && (newData.child('senderId').val() === auth.uid || newData.child('senderId').val() === 'system' || newData.child('senderId').val() === 'bot')"
+        }
+      }
+    },
+
+    "games": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "bots": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "botcommands": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "botNotifications": {
+      "$roomId": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null"
+        }
+      }
+    },
+
+    "moderation": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "redeemCodes": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+
+    "roomSchedulers": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}

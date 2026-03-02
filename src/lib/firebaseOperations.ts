@@ -1456,7 +1456,9 @@ export function sendPrivateMessage(conversationId: string, message: Omit<ChatMes
 
   // Increment unread count for recipient if provided
   if (recipientId) {
-    incrementUnreadCount(recipientId, conversationId);
+    incrementUnreadCount(recipientId, conversationId).catch((error) => {
+      console.warn('Failed to increment unread count:', error);
+    });
   }
 }
 
@@ -2936,21 +2938,26 @@ export async function addXP(userId: string, amount: number): Promise<{ leveledUp
   return { leveledUp, newLevel };
 }
 
-// Record a message sent and award 1 XP per 10 messages
+// Record a message sent and award 1 XP per 2 messages
 export async function recordMessageSent(userId: string): Promise<void> {
   const userRef = doc(db, 'users', userId);
   try {
-    const res = await runTransaction(db, async (tx) => {
-      const snap = await tx.get(userRef);
-      if (!snap.exists()) return { messagesSent: 0 };
-      const data: any = snap.data();
-      const prev = data.messagesSent || 0;
-      const next = prev + 1;
-      tx.update(userRef, { messagesSent: next });
-      return { messagesSent: next };
-    });
-    if (res.messagesSent % 10 === 0) {
-      try { await addXP(userId, 1); } catch (e) { console.warn('Failed to award message XP:', e); }
+    // Use atomic increment to avoid transaction precondition conflicts when
+    // other user fields are being updated concurrently (presence, unread, etc).
+    await updateDoc(userRef, { messagesSent: increment(1) });
+
+    // Best-effort XP grant: read back current count and award every 10 messages.
+    // This may miss occasional awards under extreme concurrency, but avoids
+    // noisy write failures during messaging.
+    try {
+      const snap = await getDoc(userRef);
+      if (!snap.exists()) return;
+      const messagesSent = Number((snap.data() as any).messagesSent || 0);
+      if (messagesSent > 0 && messagesSent % 2 === 0) {
+        await addXP(userId, 1);
+      }
+    } catch (e) {
+      console.warn('Failed to evaluate message XP milestone:', e);
     }
   } catch (e) {
     console.error(`Failed to record messageSent for ${userId}:`, e);
